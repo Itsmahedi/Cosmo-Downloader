@@ -20,6 +20,8 @@ pub struct AddDialogState<'a> {
     pub description: &'a mut String,
     pub file_size: Option<u64>,
     pub is_probing: bool,
+    pub is_reading_info: bool,
+    pub info_error: Option<&'a str>,
     pub error_message: Option<&'a str>,
     pub show_notes_expanded: &'a mut bool,
     pub show_advanced_expanded: &'a mut bool,
@@ -32,6 +34,8 @@ pub struct AddDialogOutcome {
     pub open_settings: bool,
     pub url_changed: bool,
     pub category_changed: bool,
+    pub retry_info: bool,
+    pub use_link_as_is: bool,
 }
 
 pub fn format_path_smart_measured(ui: &egui::Ui, dir: &str, filename: &str, max_px: f32) -> String {
@@ -138,43 +142,6 @@ pub fn format_path_smart_measured(ui: &egui::Ui, dir: &str, filename: &str, max_
     best
 }
 
-pub fn render_add_download_dialog(
-    ui: &mut egui::Ui,
-    pal: &ThemeColors,
-    state: &mut AddDialogState<'_>,
-    _logo_tex: Option<&egui::TextureHandle>,
-) -> AddDialogOutcome {
-    let mut outcome = AddDialogOutcome {
-        start_now: false,
-        download_later: false,
-        cancel: false,
-        open_settings: false,
-        url_changed: false,
-        category_changed: false,
-    };
-
-    let body_h = 255.0_f32; // Strictly 255px: 350px total - 36px title bar - 59px footer
-
-    ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), body_h),
-        egui::Layout::top_down(egui::Align::LEFT),
-        |ui| {
-            egui::Frame::none()
-                .inner_margin(Margin { left: 24.0, right: 24.0, top: 20.0, bottom: 16.0 })
-                .show(ui, |ui| {
-                    render_add_download_body(ui, pal, state, &mut outcome);
-                });
-        },
-    );
-
-    egui::Frame::none()
-        .inner_margin(Margin { left: 24.0, right: 24.0, top: 0.0, bottom: 0.0 })
-        .show(ui, |ui| {
-            render_add_download_footer(ui, pal, state, &mut outcome);
-        });
-
-    outcome
-}
 
 pub fn render_add_download_body(
     ui: &mut egui::Ui,
@@ -243,13 +210,21 @@ pub fn render_add_download_body(
     let icon_rect = Rect::from_center_size(icon_box.center(), Vec2::splat(18.0));
     icons::draw_category_symbol(ui.painter(), icon_rect, state.category, pal.accent);
 
-    let display_name = if state.filename.trim().is_empty() {
+    let display_name = if state.is_reading_info {
+        "Reading video info..."
+    } else if state.info_error.is_some() {
+        "Couldn't read this video"
+    } else if state.filename.trim().is_empty() {
         "File will be resolved from link"
     } else {
         state.filename.as_str()
     };
 
-    let meta_text = if rustget_core::youtube::is_streaming_site(state.url) {
+    let meta_text = if state.is_reading_info {
+        format!("{} · Reading streaming info...", state.category)
+    } else if let Some(ref err) = state.info_error {
+        format!("{} · {}", state.category, err)
+    } else if rustget_core::youtube::is_streaming_site(state.url) {
         format!("{} · YouTube", state.category)
     } else if let Ok(parsed) = url::Url::parse(state.url.trim()) {
         let host = parsed.host_str().unwrap_or("link").trim_start_matches("www.");
@@ -271,12 +246,19 @@ pub fn render_add_download_body(
         ui.set_clip_rect(text_rect);
         ui.set_max_width(text_rect.width());
         ui.spacing_mut().item_spacing.y = 2.0;
+        let title_color = if state.info_error.is_some() {
+            pal.danger
+        } else if state.is_reading_info {
+            pal.accent
+        } else {
+            pal.text
+        };
         ui.add(
             egui::Label::new(
                 egui::RichText::new(display_name)
                     .size(13.5)
                     .strong()
-                    .color(pal.text),
+                    .color(title_color),
             )
             .truncate(),
         );
@@ -289,6 +271,20 @@ pub fn render_add_download_body(
             .truncate(),
         );
     });
+
+    if state.info_error.is_some() {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("⚠ Couldn't read this video").size(12.0).color(pal.danger).strong());
+            ui.add_space(8.0);
+            if ui.button(egui::RichText::new("Retry").size(11.5).color(pal.text)).clicked() {
+                outcome.retry_info = true;
+            }
+            if ui.button(egui::RichText::new("Use the link as is").size(11.5).color(pal.accent)).clicked() {
+                outcome.use_link_as_is = true;
+            }
+        });
+    }
 
     // gap 16
     ui.add_space(16.0);

@@ -1,9 +1,7 @@
 pub mod add_download;
-pub mod complete_popup;
-pub mod progress_popup;
+pub mod download_window;
 pub mod settings;
 
 pub use add_download::*;
-pub use complete_popup::*;
-pub use progress_popup::*;
+pub use download_window::*;
 pub use settings::*;
