@@ -1,4 +1,4 @@
-﻿use percent_encoding::percent_decode_str;
+use percent_encoding::percent_decode_str;
 use reqwest::header::{HeaderMap, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE};
 use reqwest::Client;
 use tracing::{debug, warn};
@@ -413,14 +413,75 @@ fn is_windows_reserved_name(stem: &str) -> bool {
 }
 
 /// Replaces illegal Windows characters (< > : " / \ | ? *) with look-alikes (＜ ＞ ： ＂ ⧸ ⧹ ｜ ？ ＊),
-/// preserves Unicode letters/digits and [ ] ( ) , -, collapses repeated spaces, trims trailing dots/spaces,
+/// removes invisible and bidi control characters while preserving ZWJ (U+200D) and VS-16 (U+FE0F),
+/// strips leading notification counts like "(19) " and trailing " - YouTube" / " | YouTube",
+/// normalizes non-standard spaces to standard space, collapses repeated spaces, trims trailing dots/spaces,
 /// prefixes Windows reserved names with '_', and cuts length so full path stays under 250 characters.
 pub fn sanitize_filename(name: &str) -> String {
-    let mut mapped = String::with_capacity(name.len());
+    // 1. Log code points of last 10 characters
+    let last_10: Vec<char> = name.chars().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+    let codepoints: Vec<String> = last_10.iter().map(|&c| format!("U+{:04X}", c as u32)).collect();
+    tracing::info!(
+        "sanitize_filename: input='{}', last_10_chars={:?}, codepoints=[{}]",
+        name,
+        last_10,
+        codepoints.join(", ")
+    );
+
+    // 2. Strip leading notification counter e.g. "(19) "
+    let mut working = name.trim();
+    if working.starts_with('(') {
+        if let Some(close_idx) = working.find(')') {
+            let inside = &working[1..close_idx];
+            if !inside.is_empty() && inside.chars().all(|c| c.is_ascii_digit()) {
+                working = working[close_idx + 1..].trim_start();
+            }
+        }
+    }
+
+    // 3. Strip " - YouTube" or " | YouTube" (before extension or at end)
+    for suffix in &[" - YouTube", " | YouTube", " - youtube", " | youtube"] {
+        if let Some(idx) = working.rfind(suffix) {
+            let after = &working[idx + suffix.len()..];
+            if after.is_empty() || (after.starts_with('.') && !after[1..].contains('.')) {
+                let mut stripped = working[..idx].to_string();
+                stripped.push_str(after);
+                return sanitize_filename(&stripped);
+            }
+        }
+    }
+
+    let mut mapped = String::with_capacity(working.len());
     let mut prev_space = false;
 
-    for c in name.chars() {
-        if c.is_control() {
+    for c in working.chars() {
+        let u = c as u32;
+
+        // Keep emoji joiners/selectors
+        let is_emoji_modifier = u == 0x200D || u == 0xFE0F;
+
+        // Remove invisible & bidi control characters:
+        // U+200B (ZWSP), U+200C (ZWNJ), U+200E (LRM), U+200F (RLM)
+        // U+202A..=U+202E (Embedding/overrides)
+        // U+2060..=U+2064 (Word joiner, invisible math/operators)
+        // U+FEFF (BOM/ZWNBSP), U+00AD (Soft hyphen), U+180E (MVS)
+        if !is_emoji_modifier && (
+            u == 0x200B || u == 0x200C || u == 0x200E || u == 0x200F
+            || (0x202A..=0x202E).contains(&u)
+            || (0x2060..=0x2064).contains(&u)
+            || u == 0xFEFF || u == 0x00AD || u == 0x180E
+        ) {
+            // Drop completely (do not insert space)
+            continue;
+        }
+
+        // Replace non-standard spaces with standard space ' ':
+        // U+00A0 (NBSP), U+2000..=U+200A (En/Em/Thin/Hair spaces), U+202F (NNBSP), U+205F (MMSP), U+3000 (Ideographic space)
+        let is_nonstandard_space = u == 0x00A0
+            || (0x2000..=0x200A).contains(&u)
+            || u == 0x202F || u == 0x205F || u == 0x3000;
+
+        if is_nonstandard_space || c.is_whitespace() {
             if !prev_space {
                 mapped.push(' ');
                 prev_space = true;
@@ -428,31 +489,29 @@ pub fn sanitize_filename(name: &str) -> String {
             continue;
         }
 
-        let replacement = match c {
-            '<' => Some('＜'), // U+FF1C
-            '>' => Some('＞'), // U+FF1E
-            ':' => Some('：'), // U+FF1A
-            '"' => Some('＂'), // U+FF02
-            '/' => Some('⧸'), // U+29F8
-            '\\' => Some('⧹'), // U+29F9
-            '|' => Some('｜'), // U+FF5C
-            '?' => Some('？'), // U+FF1F
-            '*' => Some('＊'), // U+FF0A
-            _ => None,
-        };
+        // Never write U+FFFD () into the filename
+        if u == 0xFFFD {
+            tracing::warn!("sanitize_filename: dropping U+FFFD replacement character from '{}'", name);
+            continue;
+        }
 
-        if let Some(rep) = replacement {
-            mapped.push(rep);
-            prev_space = false;
-        } else if c.is_whitespace() {
+        // Drop raw control characters (excluding emoji modifiers) without emitting spaces
+        if c.is_control() && !is_emoji_modifier {
+            continue;
+        }
+
+        // Strip characters forbidden by Windows: < > : " / \ | ? *
+        // Replace with space so adjacent words do not concatenate, collapsing any double spaces.
+        if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
             if !prev_space {
                 mapped.push(' ');
                 prev_space = true;
             }
-        } else {
-            mapped.push(c);
-            prev_space = false;
+            continue;
         }
+
+        mapped.push(c);
+        prev_space = false;
     }
 
     let trimmed = mapped
@@ -462,12 +521,25 @@ pub fn sanitize_filename(name: &str) -> String {
         return "download.bin".to_string();
     }
 
-    // Protect Windows reserved device names (e.g. CON, NUL, COM1.log, etc.)
-    let stem = trimmed.split('.').next().unwrap_or(trimmed);
-    let safe = if is_windows_reserved_name(stem) {
-        format!("_{}", trimmed)
+    // Trim spaces and dots from the stem before the extension (e.g. "title ❤  .mp4" -> "title ❤.mp4")
+    let cleaned_extension = if let Some(dot_idx) = trimmed.rfind('.') {
+        let stem = trimmed[..dot_idx].trim_end_matches([' ', '.']);
+        let ext = &trimmed[dot_idx..];
+        if !stem.is_empty() && ext.chars().count() <= 10 {
+            format!("{}{}", stem, ext)
+        } else {
+            trimmed.to_string()
+        }
     } else {
         trimmed.to_string()
+    };
+
+    // Protect Windows reserved device names (e.g. CON, NUL, COM1.log, etc.)
+    let stem = cleaned_extension.split('.').next().unwrap_or(&cleaned_extension);
+    let safe = if is_windows_reserved_name(stem) {
+        format!("_{}", cleaned_extension)
+    } else {
+        cleaned_extension
     };
 
     // Enforce safe filename length (< 180 chars) to ensure full path stays well under 250 chars
@@ -517,10 +589,30 @@ mod tests {
     #[test]
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("valid_name.zip"), "valid_name.zip");
-        assert_eq!(sanitize_filename("bad/name:with*chars?.txt"), "bad⧸name：with＊chars？.txt");
+        assert_eq!(sanitize_filename("bad/name:with*chars?.txt"), "bad name with chars.txt");
+        assert_eq!(
+            sanitize_filename("Famous Alfaaz Video (Full) – Voice of Angels | William Gamborg & Surtaal Music Academy ❤.mp4"),
+            "Famous Alfaaz Video (Full) – Voice of Angels William Gamborg & Surtaal Music Academy ❤.mp4"
+        );
         assert_eq!(
             sanitize_filename("[2] Famous Alfaaz Video (Full) - William Gamborg | Surtaal Music Academy"),
-            "[2] Famous Alfaaz Video (Full) - William Gamborg ｜ Surtaal Music Academy"
+            "[2] Famous Alfaaz Video (Full) - William Gamborg Surtaal Music Academy"
+        );
+        assert_eq!(
+            sanitize_filename("(19) Famous Alfaaz Video (Full) - YouTube.mp4"),
+            "Famous Alfaaz Video (Full).mp4"
+        );
+        assert_eq!(
+            sanitize_filename("Famous Alfaaz Video (Full) | Surtaal Music Academy ❤\u{200e}\u{200b}    .mp4"),
+            "Famous Alfaaz Video (Full) Surtaal Music Academy ❤.mp4"
+        );
+        assert_eq!(
+            sanitize_filename("Title with \u{FFFD} replacement.mp4"),
+            "Title with replacement.mp4"
+        );
+        assert_eq!(
+            sanitize_filename("(42) Video with ideographic\u{3000}space\u{00a0}and emoji 💖 - YouTube"),
+            "Video with ideographic space and emoji 💖"
         );
         assert_eq!(
             sanitize_filename("আমার সোনার বাংলা - পর্ব ১"),

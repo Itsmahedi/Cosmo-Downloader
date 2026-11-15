@@ -50,6 +50,56 @@ let reconnectTimer = null;
 
 const pendingNativeResolvers = [];
 const recentUrls = new Map();
+const sentUrls = new Map();
+
+function extractYouTubeId(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") {
+      if (u.searchParams.has("v")) {
+        return u.searchParams.get("v");
+      }
+      if (host === "youtu.be") {
+        const parts = u.pathname.split("/").filter(Boolean);
+        if (parts.length > 0) return parts[0];
+      }
+      const prefixes = ["/shorts/", "/embed/", "/v/", "/live/"];
+      for (const p of prefixes) {
+        if (u.pathname.startsWith(p)) {
+          const parts = u.pathname.slice(p.length).split("/").filter(Boolean);
+          if (parts.length > 0) return parts[0];
+        }
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+function markUrlSent(url) {
+  if (!url) return;
+  const clean = String(url).trim();
+  const now = Date.now();
+  sentUrls.set(clean, now);
+  recentUrls.set(clean, now);
+  if (sentUrls.size > 128) {
+    for (const [k, ts] of sentUrls.entries()) {
+      if (now - ts > 5000) sentUrls.delete(k);
+    }
+  }
+}
+
+function isUrlRecentlySent(url) {
+  if (!url) return false;
+  const clean = String(url).trim();
+  const now = Date.now();
+  const ts = sentUrls.get(clean);
+  if (ts && (now - ts) < 5000) {
+    return true;
+  }
+  return false;
+}
 
 function loadSettings() {
   chrome.storage.local.get(
@@ -99,19 +149,23 @@ function setBadgeError(msg) {
 }
 
 async function probeAppHealth() {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 500);
-    const resp = await fetch("http://127.0.0.1:42424/health", {
-      method: "GET",
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    if (resp.ok) {
-      const data = await resp.json();
-      return Boolean(data && data.status === "ok");
-    }
-  } catch (_) {}
+  for (const host of ["127.0.0.1", "localhost"]) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1200);
+      const resp = await fetch(`http://${host}:42424/health`, {
+        method: "GET",
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.status === "ok") {
+          return true;
+        }
+      }
+    } catch (_) {}
+  }
   return false;
 }
 
@@ -233,6 +287,7 @@ async function deliverToCosmo(data) {
   if (!/^https?:\/\//i.test(url)) {
     return { success: false, error: "Only http:// and https:// URLs can be sent to Cosmo Downloader" };
   }
+  markUrlSent(url);
 
   let cookieHeader = data.cookies || "";
   if (!cookieHeader) {
@@ -368,8 +423,17 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
   if (downloadItem.byExtensionId && downloadItem.byExtensionId === chrome.runtime.id) return;
 
   const url = downloadItem.url || "";
+  const referrer = downloadItem.referrer || "";
+  const ytId = extractYouTubeId(url) || extractYouTubeId(referrer);
+  if (isUrlRecentlySent(url) || isUrlRecentlySent(referrer) || (ytId && isUrlRecentlySent("youtube:" + ytId))) {
+    console.log("[CosmoDownloader] Suppressing browser download event for recently sent URL/referrer:", url, referrer);
+    return;
+  }
   if (!shouldIntercept(downloadItem)) return;
   if (isDuplicateRecentUrl(url)) return;
+  markUrlSent(url);
+  if (referrer) markUrlSent(referrer);
+  if (ytId) markUrlSent("youtube:" + ytId);
 
   // Pause browser download while handing off so browser fallback stays intact on failure.
   chrome.downloads.pause(downloadItem.id, () => {
@@ -386,7 +450,7 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
       mime: downloadItem.mime || "",
       referrer: downloadItem.referrer || "",
     }).then((res) => {
-      if (res.success) {
+      if (res && res.success) {
         chrome.downloads.cancel(downloadItem.id, () => {
           const _cancelErr = chrome.runtime.lastError;
           chrome.downloads.erase({ id: downloadItem.id }, () => {
@@ -399,6 +463,8 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
           const _resumeErr = chrome.runtime.lastError;
         });
       }
+    }).catch(() => {
+      chrome.downloads.resume(downloadItem.id, () => {});
     });
   });
 });
@@ -444,9 +510,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.action) {
     case "getStatus":
       (async () => {
-        const appRunning = await probeAppHealth();
+        let appRunning = await probeAppHealth();
         if (!nativePort) {
           connectNativeHost();
+        }
+        if (!appRunning && nativePort) {
+          try {
+            const hostStatus = await sendViaNativeHost({ action: "status" }, 1200);
+            if (hostStatus && hostStatus.success && hostStatus.app_running) {
+              appRunning = true;
+            }
+          } catch (_) {}
         }
         const hostInstalled = isConnected && nativePort !== null;
         sendResponse({
@@ -546,12 +620,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case "downloadVideo":
       if (message.url) {
+        const dedupeKey = (message.url || "") + "::" + (message.quality || message.filename || "");
+        if (isUrlRecentlySent(dedupeKey)) {
+          console.log("[CosmoDownloader] Suppressing duplicate rapid-fire downloadVideo message for:", dedupeKey);
+          sendResponse({ success: true, deduplicated: true });
+          return true;
+        }
+        markUrlSent(dedupeKey);
+        markUrlSent(message.url);
+        if (message.pageUrl) {
+          markUrlSent(message.pageUrl);
+        }
+        const ytId = extractYouTubeId(message.url) || extractYouTubeId(message.pageUrl);
+        if (ytId) {
+          markUrlSent("youtube:" + ytId);
+        }
         deliverToCosmo({
           action: "download",
           url: message.url,
           filename: message.filename || "",
           referrer: message.pageUrl || "",
-        }).then((res) => sendResponse(res));
+        }).then((res) => sendResponse(res))
+          .catch((err) => sendResponse({ success: false, error: String(err) }));
         return true;
       }
       sendResponse({ success: false, error: "Empty video URL" });

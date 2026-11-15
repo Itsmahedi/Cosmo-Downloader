@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -52,6 +52,90 @@ pub fn normalize_streaming_url(raw_url: &str) -> String {
             return parsed.to_string();
         }
     }
+    trimmed.to_string()
+}
+
+/// Normalizes a URL into a deduplication key.
+/// - For YouTube: extracts video ID (from "v" query param, youtu.be path, /shorts/, /embed/)
+///   and ignores list, start_radio, index, t, si, feature, and any other tracking parameters.
+///   Returns e.g. "youtube:<video_id>".
+/// - For other sites: lowercases host/scheme, removes fragment (#...), and strips
+///   known tracking query parameters (utm_*, fbclid, gclid, msclkid, si, ref, feature, etc.).
+/// - If invalid or empty: returns trimmed string.
+pub fn normalize_url_key(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(mut parsed) = url::Url::parse(trimmed) {
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+
+        // 1. YouTube normalization
+        if host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be" {
+            // Check for ?v=...
+            if let Some((_, vid)) = parsed.query_pairs().find(|(k, _)| k == "v") {
+                if !vid.trim().is_empty() {
+                    return format!("youtube:{}", vid.trim());
+                }
+            }
+
+            // Check for youtu.be/<video_id>
+            if host == "youtu.be" {
+                let path = parsed.path().trim_start_matches('/');
+                let vid = path.split('/').next().unwrap_or("");
+                if !vid.is_empty() {
+                    return format!("youtube:{}", vid);
+                }
+            }
+
+            // Check for /shorts/<video_id>, /embed/<video_id>, /v/<video_id>, /live/<video_id>
+            let path = parsed.path();
+            for prefix in &["/shorts/", "/embed/", "/v/", "/live/"] {
+                if path.starts_with(prefix) {
+                    let vid = path.trim_start_matches(prefix).split('/').next().unwrap_or("");
+                    if !vid.is_empty() {
+                        return format!("youtube:{}", vid);
+                    }
+                }
+            }
+        }
+
+        // 2. Other sites normalization
+        parsed.set_fragment(None);
+
+        let tracking_params = [
+            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
+            "fbclid", "gclid", "msclkid", "mc_cid", "mc_eid", "_ga", "_gl", "si", "ref", "source", "feature"
+        ];
+
+        let filtered_pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| !tracking_params.contains(&k.to_ascii_lowercase().as_str()))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        parsed.set_query(None);
+        if !filtered_pairs.is_empty() {
+            let mut q = String::new();
+            for (i, (k, v)) in filtered_pairs.iter().enumerate() {
+                if i > 0 {
+                    q.push('&');
+                }
+                q.push_str(k);
+                q.push('=');
+                q.push_str(v);
+            }
+            parsed.set_query(Some(&q));
+        }
+
+        let mut res = parsed.to_string();
+        if res.ends_with('/') && parsed.path() != "/" && parsed.query().is_none() {
+            res.pop();
+        }
+        return res;
+    }
+
     trimmed.to_string()
 }
 
@@ -188,14 +272,29 @@ pub async fn fetch_video_title(bin: &Path, url: &str) -> Option<String> {
     let mut cmd = Command::new(bin);
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
-    cmd.args(["--print", "%(title)s", "--no-warnings", url]);
+    cmd.args(["--encoding", "utf-8", "--dump-single-json", "--no-playlist", "--no-warnings", url]);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let output = cmd.output().await.ok()?;
     if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout);
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            if let Some(title) = json.get("title").and_then(|v| v.as_str()) {
+                let trimmed = title.trim();
+                if trimmed.contains('\u{FFFD}') {
+                    tracing::warn!("fetch_video_title: decoded JSON title contains U+FFFD: '{}'", trimmed);
+                }
+                let codepoints: Vec<String> = trimmed.chars().map(|c| format!("U+{:04X}", c as u32)).collect();
+                info!("yt-dlp JSON title '{}' code points: {}", trimmed, codepoints.join(" "));
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+
+        let text = String::from_utf8(output.stdout.clone())
+            .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
         let trimmed = text.lines().next()?.trim().to_string();
         let codepoints: Vec<String> = trimmed.chars().map(|c| format!("U+{:04X}", c as u32)).collect();
         info!("yt-dlp title '{}' code points: {}", trimmed, codepoints.join(" "));
@@ -204,6 +303,126 @@ pub async fn fetch_video_title(bin: &Path, url: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamingVideoInfo {
+    pub title: String,
+    pub filename: String,
+    pub filesize_approx: Option<u64>,
+}
+
+/// Query video title and approximate size asynchronously using yt-dlp with a 15s timeout.
+pub async fn query_streaming_video_info(url: &str) -> std::result::Result<StreamingVideoInfo, String> {
+    let ytdlp = find_ytdlp_binary().ok_or_else(|| "yt-dlp binary not found".to_string())?;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "cosmo_probe_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let _ = tokio::fs::create_dir_all(&temp_dir).await;
+
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = Command::new(&ytdlp);
+    cmd.current_dir(&temp_dir);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.args([
+        "--encoding", "utf-8",
+        "--dump-single-json",
+        "--no-playlist",
+        "--no-warnings",
+        url,
+    ]);
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output_res = tokio::time::timeout(Duration::from_secs(15), cmd.output()).await;
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+
+    match output_res {
+        Ok(Ok(output)) => {
+            if output.status.success() {
+                let mut raw_title = String::new();
+                let mut size: Option<u64> = None;
+
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(t) = json.get("title").and_then(|v| v.as_str()) {
+                        raw_title = t.trim().to_string();
+                    }
+                    size = json.get("filesize").and_then(|v| v.as_u64())
+                        .or_else(|| json.get("filesize_approx").and_then(|v| v.as_u64()));
+                }
+
+                if raw_title.is_empty() {
+                    let stdout = String::from_utf8(output.stdout.clone())
+                        .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
+                    let mut lines = stdout.lines();
+                    raw_title = lines.next().unwrap_or("").trim().to_string();
+                    let raw_size_str = lines.next().unwrap_or("").trim().to_string();
+                    if size.is_none() {
+                        size = raw_size_str.parse::<u64>().ok();
+                    }
+                }
+
+                if raw_title.contains('\u{FFFD}') {
+                    tracing::warn!("query_streaming_video_info: title contains U+FFFD: '{}'", raw_title);
+                }
+
+                let title = if !raw_title.is_empty() {
+                    let mut t = raw_title.as_str().trim();
+                    if t.starts_with('(') {
+                        if let Some(close_idx) = t.find(')') {
+                            let inside = &t[1..close_idx];
+                            if !inside.is_empty() && inside.chars().all(|c| c.is_ascii_digit()) {
+                                t = t[close_idx + 1..].trim_start();
+                            }
+                        }
+                    }
+                    for suffix in &[" - YouTube", " | YouTube", " - youtube", " | youtube"] {
+                        if let Some(idx) = t.rfind(suffix) {
+                            if idx + suffix.len() == t.len() {
+                                t = &t[..idx];
+                                break;
+                            }
+                        }
+                    }
+                    t.trim().to_string()
+                } else {
+                    "YouTube_Video".to_string()
+                };
+                let sanitized = crate::probe::sanitize_filename(&title);
+                let filename = if sanitized.contains('.') {
+                    sanitized
+                } else {
+                    format!("{}.mp4", sanitized)
+                };
+
+                Ok(StreamingVideoInfo {
+                    title,
+                    filename,
+                    filesize_approx: size,
+                })
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let err_msg = if !stderr.trim().is_empty() {
+                    stderr.trim().to_string()
+                } else {
+                    "Failed to extract video info".to_string()
+                };
+                Err(err_msg)
+            }
+        }
+        Ok(Err(e)) => Err(format!("Process error: {}", e)),
+        Err(_) => Err("Video info lookup timed out after 15s".to_string()),
+    }
 }
 
 /// Download a streaming video (e.g. YouTube) with progress tracking and cancellation.
@@ -445,5 +664,53 @@ mod tests {
             normalize_streaming_url(playlist_only),
             "https://www.youtube.com/playlist?list=PL123456789"
         );
+    }
+
+    #[test]
+    fn test_normalize_url_key() {
+        // YouTube variants
+        assert_eq!(
+            normalize_url_key("https://www.youtube.com/watch?v=B402rKl4bUg"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://www.youtube.com/watch?v=B402rKl4bUg&list=RD123&index=2&t=45s&si=abc"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://youtu.be/B402rKl4bUg?si=xyz&feature=share"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://www.youtube.com/shorts/B402rKl4bUg?feature=share"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://www.youtube.com/embed/B402rKl4bUg"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://music.youtube.com/watch?v=B402rKl4bUg"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://m.youtube.com/watch?v=B402rKl4bUg"),
+            "youtube:B402rKl4bUg"
+        );
+        assert_eq!(
+            normalize_url_key("https://www.youtube.com/live/B402rKl4bUg"),
+            "youtube:B402rKl4bUg"
+        );
+
+        // Non-YouTube sites
+        assert_eq!(
+            normalize_url_key("https://Example.COM/file.iso#part1"),
+            "https://example.com/file.iso"
+        );
+        assert_eq!(
+            normalize_url_key("https://EXAMPLE.COM/files/file.iso?utm_source=twitter&utm_medium=social&si=123&token=abc"),
+            "https://example.com/files/file.iso?token=abc"
+        );
+        assert_eq!(normalize_url_key(""), "");
     }
 }

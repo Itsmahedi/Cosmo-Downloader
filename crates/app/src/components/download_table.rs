@@ -40,8 +40,9 @@ pub fn render_download_table(
     sort_asc: &mut bool,
 ) -> TableAction {
     let mut table_action = TableAction::default();
+    let screen_w = ui.ctx().screen_rect().width();
     let avail_w = ui.available_width();
-    let compact = avail_w < 580.0;
+    let compact = screen_w < 860.0 || avail_w < 620.0;
 
     // Header (.th, 34px)
     let th_rect = ui.allocate_space(Vec2::new(avail_w, 34.0)).1;
@@ -135,12 +136,20 @@ fn draw_sort_header(
     } else {
         pal.muted
     };
-    ui.painter().text(
-        pos2(x, th_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        text,
-        egui::FontId::proportional(12.0),
-        color,
+    let mut header_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    header_ui.set_clip_rect(rect);
+    header_ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .size(12.0)
+                .color(color),
+        )
+        .truncate()
+        .selectable(false),
     );
     if resp.clicked() {
         if *sort_col == col {
@@ -432,12 +441,24 @@ fn render_table_row(
     } else {
         pal.muted
     };
-    ui.painter().text(
-        pos2(cols.status_x, mid_y),
-        egui::Align2::LEFT_CENTER,
-        status_label,
-        egui::FontId::proportional(12.0),
-        status_color,
+    let status_rect = Rect::from_min_max(
+        pos2(cols.status_x, row_rect.top()),
+        pos2(row_rect.right() - 8.0, row_rect.bottom()),
+    );
+    let mut status_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(status_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    status_ui.set_clip_rect(status_rect);
+    status_ui.add(
+        egui::Label::new(
+            egui::RichText::new(status_label)
+                .size(12.0)
+                .color(status_color),
+        )
+        .truncate()
+        .selectable(false),
     );
     delete_request
 }

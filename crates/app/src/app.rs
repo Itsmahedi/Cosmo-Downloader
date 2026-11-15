@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Margin, Stroke, Vec2};
+use eframe::egui::{self, Margin, Pos2, Stroke, Vec2};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tray_icon::TrayIcon;
@@ -74,6 +74,29 @@ pub fn compute_category_counts(downloads: &[DownloadRecord]) -> CategoryCounts {
     counts
 }
 
+#[derive(Clone, Debug)]
+pub struct DownloadDialogRequest {
+    pub url: String,
+    pub filename: Option<String>,
+    pub cookies: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub num_segments: Option<usize>,
+}
+
+impl DownloadDialogRequest {
+    pub fn empty() -> Self {
+        Self {
+            url: String::new(),
+            filename: None,
+            cookies: None,
+            referer: None,
+            user_agent: None,
+            num_segments: None,
+        }
+    }
+}
+
 pub struct CosmoDownloaderApp {
     pub queue: Arc<QueueManager>,
     pub downloads: Vec<DownloadRecord>,
@@ -99,13 +122,20 @@ pub struct CosmoDownloaderApp {
     pub show_settings_dialog: bool,
     pub show_about_dialog: bool,
     pub completed_dialog_record: Option<DownloadRecord>,
-    pub is_completed_popup_mode: bool,
     pub active_popup_task_id: Option<String>,
     pub active_popup_filename: String,
     pub active_popup_url: String,
     pub active_popup_target_path: String,
-    pub is_progress_popup_mode: bool,
     pub pending_task_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+    pub download_windows: Vec<DownloadWindowState>,
+    pub window_task_tx: tokio::sync::mpsc::Sender<(usize, String)>,
+    pub window_task_rx: tokio::sync::mpsc::Receiver<(usize, String)>,
+
+    // Deduplication & queue fields
+    pub recent_dialog_keys: HashMap<String, Instant>,
+    pub download_started_at: HashMap<String, Instant>,
+    pub pending_dialog_queue: VecDeque<DownloadDialogRequest>,
+    pub extension_request_count: usize,
 
     // Add dialog fields
     pub add_url: String,
@@ -170,6 +200,7 @@ impl CosmoDownloaderApp {
         let mut standalone_popup_file = None;
         let mut standalone_req = None;
         let mut initial_url_arg: Option<String> = None;
+        let mut cli_view: Option<String> = None;
         let mut screenshot_path: Option<String> = None;
         let mut custom_scale: Option<f32> = None;
         let mut hover_menu_name: Option<String> = None;
@@ -199,6 +230,8 @@ impl CosmoDownloaderApp {
                         standalone_popup_file = Some(file_path);
                     }
                 }
+            } else if clean.starts_with("--view=") {
+                cli_view = Some(clean.trim_start_matches("--view=").trim_matches('"').trim_matches('\'').to_string());
             } else if clean.starts_with("--screenshot=") {
                 screenshot_path = Some(clean.trim_start_matches("--screenshot=").trim_matches('"').trim_matches('\'').to_string());
             } else if clean.starts_with("--scale=") {
@@ -207,6 +240,16 @@ impl CosmoDownloaderApp {
                 hover_menu_name = Some(clean.trim_start_matches("--hover-menu=").trim_matches('"').trim_matches('\'').to_string());
             } else if clean == "--show-add" {
                 force_show_add = true;
+            } else if clean == "--add-url" {
+                if let Some(next_u) = args_iter.next().map(|s| s.trim_matches('"').trim_matches('\'').to_string()) {
+                    initial_url_arg = Some(next_u);
+                }
+            } else if clean.starts_with("--add-url=") {
+                initial_url_arg = Some(clean.trim_start_matches("--add-url=").trim_matches('"').trim_matches('\'').to_string());
+            } else if clean.starts_with("cosmodownloader://") {
+                initial_url_arg = Some(clean.trim_start_matches("cosmodownloader://").to_string());
+            } else if clean.starts_with("rustget://") {
+                initial_url_arg = Some(clean.trim_start_matches("rustget://").to_string());
             } else if (clean.starts_with("http://") || clean.starts_with("https://")) && initial_url_arg.is_none() {
                 initial_url_arg = Some(clean.to_string());
             }
@@ -215,7 +258,19 @@ impl CosmoDownloaderApp {
         #[cfg(windows)]
         platform::windows::init_shutdown_listener(&cc.egui_ctx);
 
-        let is_popup_arg = std::env::args().any(|a| a == "--popup") || is_standalone_popup;
+        let is_popup_arg = std::env::args().skip(1).any(|a| {
+            let clean = a.trim_matches('"').trim_matches('\'');
+            clean == "--popup"
+                || clean == "--popup-file"
+                || clean.starts_with("--popup-file=")
+                || clean == "--add-url"
+                || clean.starts_with("--add-url=")
+                || clean.starts_with("cosmodownloader://")
+                || clean.starts_with("rustget://")
+                || clean.starts_with("http://")
+                || clean.starts_with("https://")
+                || clean.starts_with("--view=")
+        }) || is_standalone_popup || cli_view.is_some() || initial_url_arg.is_some();
         let start_minimized_arg = std::env::args().any(|a| a == "--minimized" || a == "--daemon");
         let is_main_open = Arc::new(AtomicBool::new(!start_minimized_arg && !is_popup_arg));
 
@@ -241,7 +296,7 @@ impl CosmoDownloaderApp {
             let ctx_wake = cc.egui_ctx.clone();
             let ctx_wake_dl = cc.egui_ctx.clone();
             let ctx_wake_quit = cc.egui_ctx.clone();
-            let is_main_open_wake = Arc::clone(&is_main_open);
+            let _is_main_open_wake = Arc::clone(&is_main_open);
             let bridge_server = BridgeServer::new(Arc::clone(&queue), 42424)
                 .with_notifier(bridge_tx)
                 .with_show_notifier(show_tx)
@@ -255,21 +310,6 @@ impl CosmoDownloaderApp {
                     ctx_wake.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
                 })
                 .with_download_wake_callback(move || {
-                    if !is_main_open_wake.load(Ordering::Relaxed) {
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(560.0, 350.0)));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(560.0, 350.0)));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(Vec2::new(560.0, 350.0)));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Title(DOWNLOAD_FILE_INFO_TITLE.to_string()));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                        #[cfg(windows)]
-                        platform::make_popup_topmost();
-                    }
                     ctx_wake_dl.request_repaint();
                 });
 
@@ -476,6 +516,8 @@ impl CosmoDownloaderApp {
             })
         };
 
+        let (window_task_tx, window_task_rx) = mpsc::channel(32);
+
         let mut app = Self {
             queue,
             downloads: initial_downloads,
@@ -500,13 +542,19 @@ impl CosmoDownloaderApp {
             show_settings_dialog: false,
             show_about_dialog: false,
             completed_dialog_record: None,
-            is_completed_popup_mode: false,
             active_popup_task_id: None,
             active_popup_filename: String::new(),
             active_popup_url: String::new(),
             active_popup_target_path: String::new(),
-            is_progress_popup_mode: false,
             pending_task_rx: None,
+            download_windows: Vec::new(),
+            window_task_tx,
+            window_task_rx,
+
+            recent_dialog_keys: HashMap::new(),
+            download_started_at: HashMap::new(),
+            pending_dialog_queue: VecDeque::new(),
+            extension_request_count: 0,
 
             add_url: String::new(),
             add_filename: String::new(),
@@ -565,21 +613,145 @@ impl CosmoDownloaderApp {
             hover_menu_name,
         };
 
-        if force_show_add {
-            app.show_add_dialog = true;
-            let url = initial_url_arg.as_deref().unwrap_or("https://www.youtube.com/watch?v=B402rKl4bUg");
-            app.prepare_download_dialog(
-                url,
-                Some("(11) Olivia Rodrigo - the cure (Official Music Video).mp4".to_string()),
-                None,
-                None,
-                None,
-                None,
+        if let Some(ref view) = cli_view {
+            let mut wnd = DownloadWindowState::new(
+                "https://speed.hetzner.de/100MB.bin".to_string(),
+                "100MB.bin".to_string(),
+                "General".to_string(),
+                "C:\\Users\\steam\\Downloads".to_string(),
             );
+            wnd.target_path = "C:\\Users\\steam\\Downloads\\100MB.bin".to_string();
+            match view.as_str() {
+                "downloading" => {
+                    wnd.stage = DownloadWindowStage::Downloading;
+                    wnd.downloaded_bytes = 119_400_000;
+                    wnd.total_bytes = Some(284_300_000);
+                    wnd.speed_bps = 8_200_000.0;
+                    wnd.eta_seconds = Some(20);
+                    wnd.disp_downloaded = 119_400_000;
+                    wnd.disp_total = Some(284_300_000);
+                    wnd.disp_speed_bps = 8_200_000.0;
+                    wnd.disp_eta_seconds = Some(20);
+                }
+                "paused" => {
+                    wnd.stage = DownloadWindowStage::Paused;
+                    wnd.downloaded_bytes = 119_400_000;
+                    wnd.total_bytes = Some(284_300_000);
+                    wnd.disp_downloaded = 119_400_000;
+                    wnd.disp_total = Some(284_300_000);
+                }
+                "complete" => {
+                    wnd.stage = DownloadWindowStage::Complete;
+                    wnd.downloaded_bytes = 284_340_000;
+                    wnd.total_bytes = Some(284_340_000);
+                    wnd.disp_downloaded = 284_340_000;
+                    wnd.disp_total = Some(284_340_000);
+                }
+                "failed" => {
+                    wnd.stage = DownloadWindowStage::Failed {
+                        reason: "Network connection lost".to_string(),
+                    };
+                    wnd.downloaded_bytes = 52_000_000;
+                    wnd.total_bytes = Some(284_300_000);
+                    wnd.disp_downloaded = 52_000_000;
+                    wnd.disp_total = Some(284_300_000);
+                }
+                "cancel" => {
+                    wnd.stage = DownloadWindowStage::Downloading;
+                    wnd.confirming_cancel = true;
+                    wnd.downloaded_bytes = 119_400_000;
+                    wnd.total_bytes = Some(284_300_000);
+                    wnd.disp_downloaded = 119_400_000;
+                    wnd.disp_total = Some(284_300_000);
+                }
+                "info" => {
+                    wnd.url = "https://www.youtube.com/watch?v=B402rKl4bUg".to_string();
+                    wnd.filename = "Olivia Rodrigo - the cure (Official Video).mp4".to_string();
+                    wnd.category = "Video".to_string();
+                    wnd.stage = DownloadWindowStage::Info;
+                }
+                "test3" => {
+                    wnd.url = "https://www.youtube.com/watch?v=B402rKl4bUg".to_string();
+                    wnd.filename = "Olivia Rodrigo - the cure (Official Video).mp4".to_string();
+                    wnd.category = "Video".to_string();
+                    wnd.stage = DownloadWindowStage::Info;
+                }
+                "test4" => {
+                    wnd.url = "https://www.youtube.com/watch?v=kJQP7kiw5Fk".to_string();
+                    wnd.filename = "Luis Fonsi - Despacito ft. Daddy Yankee.mp4".to_string();
+                    wnd.category = "Video".to_string();
+                    wnd.stage = DownloadWindowStage::Info;
+                }
+                "test6" => {
+                    wnd.url = "https://www.youtube.com/watch?v=B402rKl4bUg".to_string();
+                    wnd.filename = "Olivia Rodrigo - the cure (Official Video).mp4".to_string();
+                    wnd.category = "Video".to_string();
+                    wnd.stage = DownloadWindowStage::Downloading;
+                    wnd.downloaded_bytes = 45_200_000;
+                    wnd.total_bytes = Some(112_000_000);
+                    wnd.speed_bps = 7_400_000.0;
+                    wnd.eta_seconds = Some(9);
+                    wnd.disp_downloaded = 45_200_000;
+                    wnd.disp_total = Some(112_000_000);
+                    wnd.disp_speed_bps = 7_400_000.0;
+                    wnd.disp_eta_seconds = Some(9);
+                }
+                "cascade" | "cascade_canvas" => {
+                    wnd.url = "https://www.youtube.com/watch?v=B402rKl4bUg".to_string();
+                    wnd.filename = "Olivia Rodrigo - the cure (Official Video).mp4".to_string();
+                    wnd.category = "Video".to_string();
+                    wnd.stage = DownloadWindowStage::Info;
+                    wnd.window_pos = Some(Pos2::new(20.0, 20.0));
+                    app.download_windows.push(wnd);
+
+                    let mut wnd2 = DownloadWindowState::new(
+                        "https://www.youtube.com/watch?v=kJQP7kiw5Fk".to_string(),
+                        "Luis Fonsi - Despacito ft. Daddy Yankee.mp4".to_string(),
+                        "Video".to_string(),
+                        "C:\\Users\\steam\\Downloads".to_string(),
+                    );
+                    wnd2.stage = DownloadWindowStage::Info;
+                    wnd2.window_pos = Some(Pos2::new(44.0, 44.0)); // 24px cascade
+                    app.download_windows.push(wnd2);
+                    return app;
+                }
+                _ => {}
+            }
+            app.download_windows.push(wnd);
+        } else if force_show_add {
+            if let Some(ref url) = initial_url_arg {
+                let d_req = DownloadDialogRequest {
+                    url: url.clone(),
+                    filename: None,
+                    cookies: None,
+                    referer: None,
+                    user_agent: None,
+                    num_segments: None,
+                };
+                app.show_download_dialog(d_req, "force_show_add", None);
+            } else {
+                app.show_download_dialog(DownloadDialogRequest::empty(), "force_show_add", None);
+            }
         } else if let Some(req) = standalone_req {
-            app.prepare_download_dialog(&req.url, req.filename, req.cookies, req.referer, req.user_agent, req.num_segments);
+            let d_req = DownloadDialogRequest {
+                url: req.url,
+                filename: req.filename,
+                cookies: req.cookies,
+                referer: req.referer,
+                user_agent: req.user_agent,
+                num_segments: req.num_segments,
+            };
+            app.show_download_dialog(d_req, "standalone_req", None);
         } else if let Some(url_arg) = initial_url_arg {
-            app.prepare_download_dialog(&url_arg, None, None, None, None, None);
+            let d_req = DownloadDialogRequest {
+                url: url_arg,
+                filename: None,
+                cookies: None,
+                referer: None,
+                user_agent: None,
+                num_segments: None,
+            };
+            app.show_download_dialog(d_req, "initial_url_arg", None);
         }
 
         app
@@ -632,10 +804,12 @@ impl CosmoDownloaderApp {
     }
 
     pub fn spawn_size_probe(&mut self) {
+        platform::log_daemon(&format!("STEP: video info lookup started: url='{}'", self.add_url));
         self.add_file_size = None;
         self.add_is_probing = false;
         self.size_probe_rx = None;
         if self.add_url.trim().is_empty() || rustget_core::youtube::is_streaming_site(&self.add_url) {
+            platform::log_daemon(&format!("STEP: video info lookup finished (streaming site bypassed): url='{}'", self.add_url));
             return;
         }
         if rustget_core::probe::validate_http_url(&self.add_url).is_err() {
@@ -681,6 +855,283 @@ impl CosmoDownloaderApp {
         }
     }
 
+    pub fn show_download_dialog(
+        &mut self,
+        req: DownloadDialogRequest,
+        source: &str,
+        ctx: Option<&egui::Context>,
+    ) {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        platform::log_daemon(&format!(
+            "[{}] ShowDownloadDialog called: source='{}', url='{}'",
+            timestamp, source, req.url
+        ));
+        tracing::info!(
+            "[{}] ShowDownloadDialog called: source='{}', url='{}'",
+            timestamp, source, req.url
+        );
+
+        let url = req.url.trim();
+        let key = if !url.is_empty() {
+            rustget_core::youtube::normalize_url_key(url)
+        } else {
+            String::new()
+        };
+
+        if !key.is_empty() {
+            let now = Instant::now();
+
+            // STEP 2 Check 1: Already has an open dialog or opened within last 2 seconds
+            let has_open_dialog = self.download_windows.iter().enumerate().find(|(_, w)| {
+                w.is_open
+                    && (w.stage == DownloadWindowStage::Info
+                        || w.stage == DownloadWindowStage::Downloading
+                        || w.stage == DownloadWindowStage::Paused)
+                    && rustget_core::youtube::normalize_url_key(&w.url) == key
+            });
+
+            let recent_open = self
+                .recent_dialog_keys
+                .get(&key)
+                .map(|t| now.duration_since(*t) < Duration::from_secs(2))
+                .unwrap_or(false);
+
+            if let Some((existing_idx, _)) = has_open_dialog {
+                let target_id = self.download_windows[existing_idx].dialog_id.clone();
+                platform::log_daemon(&format!(
+                    "DEDUPE: Restoring and focusing existing dialog idx={} (dialog_id='{}') for key '{}'",
+                    existing_idx, target_id, key
+                ));
+                tracing::info!(
+                    "DEDUPE: Restoring and focusing existing dialog idx={} (dialog_id='{}') for key '{}'",
+                    existing_idx, target_id, key
+                );
+                self.download_windows[existing_idx].is_open = true;
+                self.download_windows[existing_idx].confirming_cancel = false;
+                if let Some(c) = ctx {
+                    if self.is_popup_mode && existing_idx == 0 {
+                        c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        c.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        c.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                    } else {
+                        let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_id));
+                        c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Minimized(false));
+                        c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Visible(true));
+                        c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Focus);
+                        c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                    }
+                    c.request_repaint();
+                }
+                #[cfg(windows)]
+                platform::windows::show_download_popup_window();
+                return;
+            } else if recent_open {
+                platform::log_daemon(&format!(
+                    "DEDUPE: Suppressing duplicate dialog for key '{}' (opened within last 2 seconds)",
+                    key
+                ));
+                tracing::info!(
+                    "DEDUPE: Suppressing duplicate dialog for key '{}' (opened within last 2 seconds)",
+                    key
+                );
+                if let Some((existing_idx, _)) = self.download_windows.iter().enumerate().rev().find(|(_, w)| {
+                    rustget_core::youtube::normalize_url_key(&w.url) == key
+                }) {
+                    let target_id = self.download_windows[existing_idx].dialog_id.clone();
+                    self.download_windows[existing_idx].is_open = true;
+                    if let Some(c) = ctx {
+                        if self.is_popup_mode && existing_idx == 0 {
+                            c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                            c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            c.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        } else {
+                            let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_id));
+                            c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Minimized(false));
+                            c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Visible(true));
+                            c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Focus);
+                        }
+                        c.request_repaint();
+                    }
+                    #[cfg(windows)]
+                    platform::windows::show_download_popup_window();
+                }
+                return;
+            }
+
+            // STEP 2 Check 2: Download already running or started in last 5 seconds
+            let download_recently_started = self
+                .download_started_at
+                .get(&key)
+                .map(|t| now.duration_since(*t) < Duration::from_secs(5))
+                .unwrap_or(false);
+
+            let is_download_active = self.downloads.iter().any(|d| {
+                (d.status == "downloading"
+                    || d.status == "queued"
+                    || d.status == "resumed"
+                    || d.status == "paused")
+                    && rustget_core::youtube::normalize_url_key(&d.url) == key
+            });
+
+            if download_recently_started || is_download_active {
+                platform::log_daemon(&format!(
+                    "DEDUPE: Suppressing dialog for key '{}' (download already active or started within 5s)",
+                    key
+                ));
+                tracing::info!(
+                    "DEDUPE: Suppressing dialog for key '{}' (download already active or started within 5s)",
+                    key
+                );
+                return;
+            }
+        }
+
+        // STEP 2: Up to 5 windows open at once. Extra ones wait in queue.
+        let open_count = self.download_windows.iter().filter(|w| w.is_open).count();
+        if open_count >= 5 {
+            platform::log_daemon(&format!(
+                "QUEUE: 5 dialogs already open, queueing request for '{}'",
+                req.url
+            ));
+            tracing::info!(
+                "QUEUE: 5 dialogs already open, queueing request for '{}'",
+                req.url
+            );
+            self.pending_dialog_queue.push_back(req);
+            return;
+        }
+
+        // STEP 3: Consistent position - centered over main window if visible, otherwise screen work area where mouse is
+        let main_visible = self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode;
+        let (base_x, base_y) = platform::get_dialog_center_pos(
+            main_visible,
+            crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+            crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+        );
+
+        let cascade_idx = open_count % 5;
+        let cascade_offset = (cascade_idx as f32) * 24.0;
+        let win_pos = Pos2::new(base_x + cascade_offset, base_y + cascade_offset);
+
+        // Prepare dialog attributes
+        let clean_url = if !req.url.trim().is_empty() {
+            rustget_core::youtube::normalize_streaming_url(req.url.trim())
+        } else {
+            String::new()
+        };
+
+        let mut filename = if let Some(ref f) = req.filename {
+            if !f.trim().is_empty() {
+                rustget_core::probe::sanitize_filename(f)
+            } else {
+                String::new()
+            }
+        } else if let Ok(parsed) = url::Url::parse(&clean_url) {
+            let name = rustget_core::probe::extract_filename(&reqwest::header::HeaderMap::new(), &parsed);
+            rustget_core::probe::sanitize_filename(&name)
+        } else {
+            String::new()
+        };
+
+        let cat = if rustget_core::youtube::is_streaming_site(&clean_url) {
+            if filename.is_empty() || filename.eq_ignore_ascii_case("watch") {
+                filename = "YouTube_Video.mp4".to_string();
+            } else if !filename.contains('.') {
+                filename.push_str(".mp4");
+            }
+            Category::Video
+        } else if !filename.is_empty() {
+            categorize(Some(&filename), None)
+        } else {
+            Category::General
+        };
+
+        let save_dir = self.resolve_save_dir_for_category(cat);
+
+        let mut wnd = DownloadWindowState::new(
+            clean_url.clone(),
+            filename,
+            cat.name().to_string(),
+            save_dir,
+        );
+        wnd.connections = req.num_segments.unwrap_or(self.setting_default_connections).clamp(1, 32);
+        wnd.cascade_index = cascade_idx;
+        wnd.window_pos = Some(win_pos);
+        wnd.is_open = true;
+
+        if !key.is_empty() {
+            self.recent_dialog_keys.insert(key.clone(), Instant::now());
+        }
+
+        let new_idx = self.download_windows.len();
+        let _dialog_id = wnd.dialog_id.clone();
+        self.download_windows.push(wnd);
+        platform::log_daemon(&format!("STEP: dialog window created: idx={}, url='{}'", new_idx, clean_url));
+        platform::log_daemon(&format!("STEP: dialog view/view-model created and bound: idx={}, url='{}'", new_idx, clean_url));
+
+        // Keep internal add fields updated for size probe
+        self.add_url = clean_url;
+        self.add_category = cat.name().to_string();
+        self.add_save_dir = self.resolve_save_dir_for_category(cat);
+        self.spawn_size_probe();
+
+        platform::log_daemon(&format!(
+            "DIALOG_OPEN: Created dialog idx={} for key '{}' at ({}, {}) [cascade={}]",
+            new_idx, key, win_pos.x, win_pos.y, cascade_idx
+        ));
+        tracing::info!(
+            "DIALOG_OPEN: Created dialog idx={} for key '{}' at ({}, {}) [cascade={}]",
+            new_idx, key, win_pos.x, win_pos.y, cascade_idx
+        );
+
+        let from_extension = source == "extension" || source == "standalone_req" || source == "force_show_add" || source == "initial_url_arg";
+        if from_extension || self.is_popup_mode || !self.is_main_window_open.load(Ordering::Relaxed) {
+            self.is_popup_mode = true;
+            #[cfg(windows)]
+            platform::windows::show_download_popup_window();
+            if let Some(c) = ctx {
+                c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                c.send_viewport_cmd(egui::ViewportCommand::Focus);
+                c.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                c.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                c.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                    crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                    crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                )));
+                let (cx, cy) = platform::get_dialog_center_pos(false, crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH, crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT);
+                c.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(cx, cy)));
+            }
+        }
+
+        if let Some(c) = ctx {
+            c.request_repaint();
+        }
+    }
+
+    pub fn clear_dedupe_keys_for_url(&mut self, url: &str) {
+        let key = rustget_core::youtube::normalize_url_key(url);
+        if !key.is_empty() {
+            platform::log_daemon(&format!("DEDUPE: Clearing dedupe keys for key '{}'", key));
+            self.recent_dialog_keys.remove(&key);
+            self.download_started_at.remove(&key);
+        }
+    }
+
+    pub fn check_pending_dialog_queue(&mut self, ctx: &egui::Context) {
+        let open_count = self.download_windows.iter().filter(|w| w.is_open).count();
+        if open_count < 5 {
+            if let Some(next_req) = self.pending_dialog_queue.pop_front() {
+                platform::log_daemon(&format!(
+                    "QUEUE_POP: Popping queued dialog request for '{}' (current open_count={})",
+                    next_req.url, open_count
+                ));
+                self.show_download_dialog(next_req, "queue", Some(ctx));
+            }
+        }
+    }
+
     pub fn prepare_download_dialog(
         &mut self,
         url: &str,
@@ -690,62 +1141,35 @@ impl CosmoDownloaderApp {
         user_agent: Option<String>,
         num_segments: Option<usize>,
     ) {
-        self.add_url = rustget_core::youtube::normalize_streaming_url(url);
-        self.add_cookies = cookies;
-        self.add_referer = referer;
-        self.add_user_agent = user_agent;
-        self.add_connections = num_segments.unwrap_or(self.setting_default_connections).clamp(1, 32);
-        self.add_speed_limit_kb = 0;
-        self.add_checksum.clear();
-        self.add_description.clear();
-        self.add_error_message = None;
-        self.add_file_size = None;
-        self.add_remember_category = true;
-        self.show_advanced_add = false;
-
-        if let Some(f) = filename {
-            if !f.trim().is_empty() {
-                self.add_filename = rustget_core::probe::sanitize_filename(&f);
-            }
-        } else if let Ok(parsed) = url::Url::parse(&self.add_url) {
-            let name = rustget_core::probe::extract_filename(&reqwest::header::HeaderMap::new(), &parsed);
-            self.add_filename = rustget_core::probe::sanitize_filename(&name);
-        }
-
-        let cat = if rustget_core::youtube::is_streaming_site(&self.add_url) {
-            if self.add_filename.is_empty() || self.add_filename.eq_ignore_ascii_case("watch") {
-                self.add_filename = "YouTube_Video.mp4".to_string();
-            } else if !self.add_filename.contains('.') {
-                self.add_filename.push_str(".mp4");
-            }
-            Category::Video
-        } else {
-            categorize(Some(&self.add_filename), None)
+        let req = DownloadDialogRequest {
+            url: url.to_string(),
+            filename,
+            cookies,
+            referer,
+            user_agent,
+            num_segments,
         };
-        self.add_category = cat.name().to_string();
-        self.add_save_dir = self.resolve_save_dir_for_category(cat);
-        self.show_notes_expanded = false;
-        self.show_add_dialog = true;
-
-        let codepoints: Vec<String> = self.add_filename.chars().map(|c| format!("U+{:04X}", c as u32)).collect();
-        tracing::info!("Download dialog filename '{}' code points: {}", self.add_filename, codepoints.join(" "));
-
-        self.spawn_size_probe();
+        self.show_download_dialog(req, "legacy_prepare", None);
     }
 
-    pub fn trigger_download(&mut self, start_paused: bool) -> bool {
-        let url = self.add_url.trim().to_string();
-        if let Err(err) = rustget_core::probe::validate_http_url(&url) {
-            self.add_error_message = Some(err.to_string());
+    pub fn trigger_download_for_window(&mut self, window_idx: usize, start_paused: bool) -> bool {
+        if window_idx >= self.download_windows.len() {
             return false;
         }
-        self.add_error_message = None;
+        let wnd = &mut self.download_windows[window_idx];
+        let url = wnd.url.trim().to_string();
+        platform::log_daemon(&format!("STEP: download started: idx={}, url='{}'", window_idx, url));
+        if let Err(err) = rustget_core::probe::validate_http_url(&url) {
+            wnd.error_message = Some(err.to_string());
+            return false;
+        }
+        wnd.error_message = None;
 
-        let chosen_cat = Category::from_name(&self.add_category);
-        if self.add_remember_category && !self.add_save_dir.trim().is_empty() {
+        let chosen_cat = Category::from_name(&wnd.category);
+        if wnd.remember_category && !wnd.save_dir.trim().is_empty() {
             if let Some(cat) = chosen_cat {
                 let key = cat.name().to_ascii_lowercase();
-                let dir_val = self.add_save_dir.trim().to_string();
+                let dir_val = wnd.save_dir.trim().to_string();
                 self.category_save_dirs.insert(key.clone(), dir_val.clone());
                 let db = self.queue.db().clone();
                 tokio::spawn(async move {
@@ -754,29 +1178,29 @@ impl CosmoDownloaderApp {
             }
         }
 
-        self.active_popup_filename = self.add_filename.clone();
-        self.active_popup_url = url.clone();
-
         let mut opt = DownloadOptions {
-            url,
-            num_segments: self.add_connections.clamp(1, 32),
-            expected_sha256: if self.add_checksum.trim().is_empty() {
+            url: url.clone(),
+            num_segments: wnd.connections.clamp(1, 32),
+            expected_sha256: if wnd.checksum.trim().is_empty() {
                 None
             } else {
-                Some(self.add_checksum.trim().to_string())
+                Some(wnd.checksum.trim().to_string())
             },
             ..Default::default()
         };
 
-        let mut out_path = if !self.add_save_dir.trim().is_empty() {
-            PathBuf::from(self.add_save_dir.trim())
+        let mut out_path = if !wnd.save_dir.trim().is_empty() {
+            PathBuf::from(wnd.save_dir.trim())
         } else {
             Category::General.default_dir()
         };
-        if !self.add_filename.trim().is_empty() {
-            out_path.push(rustget_core::probe::sanitize_filename(self.add_filename.trim()));
+        if !wnd.filename.trim().is_empty() {
+            out_path.push(rustget_core::probe::sanitize_filename(wnd.filename.trim()));
         }
-        self.active_popup_target_path = out_path.to_string_lossy().to_string();
+        wnd.target_path = out_path.to_string_lossy().to_string();
+        self.active_popup_target_path = wnd.target_path.clone();
+        self.active_popup_filename = wnd.filename.clone();
+        self.active_popup_url = url.clone();
         opt.output_path = Some(out_path);
 
         if let Some(c) = self.add_cookies.take() {
@@ -790,11 +1214,9 @@ impl CosmoDownloaderApp {
         }
 
         let q = Arc::clone(&self.queue);
-        let speed_bps = self.add_speed_limit_kb * 1024;
-        let (id_tx, id_rx) = mpsc::channel(1);
-        self.pending_task_rx = Some(id_rx);
+        let speed_bps = wnd.speed_limit_kb * 1024;
+        let tx = self.window_task_tx.clone();
 
-        let is_standalone = self.is_standalone_popup;
         tokio::spawn(async move {
             let res = if start_paused {
                 if let Ok(id) = q.add_download(opt, chosen_cat, speed_bps).await {
@@ -803,27 +1225,269 @@ impl CosmoDownloaderApp {
                 } else {
                     Err(())
                 }
-            } else if is_standalone {
-                q.start_download_immediately(opt, chosen_cat, speed_bps).await.map_err(|_| ())
             } else {
-                q.add_download(opt, chosen_cat, speed_bps).await.map_err(|_| ())
+                q.start_download_immediately(opt, chosen_cat, speed_bps).await.map_err(|_| ())
             };
 
             if let Ok(id) = res {
-                let _ = id_tx.send(id).await;
+                let _ = tx.send((window_idx, id)).await;
             }
         });
 
-        self.add_url.clear();
-        self.add_filename.clear();
-        self.add_checksum.clear();
-        self.add_description.clear();
-        self.add_speed_limit_kb = 0;
-        self.add_file_size = None;
-        self.add_is_probing = false;
-        self.size_probe_rx = None;
-        self.show_add_dialog = false;
+        if start_paused {
+            wnd.stage = DownloadWindowStage::Paused;
+            platform::set_taskbar_progress(platform::TBPF_PAUSED, 0, 100);
+        } else {
+            wnd.stage = DownloadWindowStage::Downloading;
+            platform::set_taskbar_progress(platform::TBPF_NORMAL, 0, 100);
+        }
+        wnd.is_open = true;
+
+        let fname = wnd.filename.clone();
+        platform::show_desktop_notification("Cosmo Downloader", &format!("Download started: {}", fname));
         true
+    }
+
+    pub fn handle_download_window_outcome(
+        &mut self,
+        window_idx: usize,
+        outcome: DownloadWindowOutcome,
+        ctx: &egui::Context,
+    ) {
+        if window_idx >= self.download_windows.len() {
+            return;
+        }
+        let dialog_id = self.download_windows[window_idx].dialog_id.clone();
+        self.handle_download_window_outcome_by_id(&dialog_id, outcome, ctx);
+    }
+
+    pub fn handle_download_window_outcome_by_id(
+        &mut self,
+        dialog_id: &str,
+        outcome: DownloadWindowOutcome,
+        ctx: &egui::Context,
+    ) {
+        let Some(window_idx) = self.download_windows.iter().position(|w| w.dialog_id == dialog_id) else {
+            return;
+        };
+        match outcome {
+            DownloadWindowOutcome::None => {}
+            DownloadWindowOutcome::StartDownload => {
+                platform::log_daemon(&format!("STEP: Start pressed: dialog_id='{}'", dialog_id));
+                let key = rustget_core::youtube::normalize_url_key(&self.download_windows[window_idx].url);
+                if !key.is_empty() {
+                    self.download_started_at.insert(key, Instant::now());
+                }
+                self.trigger_download_for_window(window_idx, false);
+                if self.setting_open_main_on_download_start {
+                    self.is_popup_mode = false;
+                    self.restore_main_window_chrome(ctx);
+                    platform::show_main_window();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.is_main_window_open.store(true, Ordering::Relaxed);
+                }
+            }
+            DownloadWindowOutcome::DownloadLater => {
+                self.trigger_download_for_window(window_idx, true);
+            }
+            DownloadWindowOutcome::UrlChanged => {
+                let cat_opt = {
+                    let wnd = &mut self.download_windows[window_idx];
+                    wnd.error_message = None;
+                    Category::from_name(&wnd.category)
+                };
+                if let Some(c) = cat_opt {
+                    let dir = self.resolve_save_dir_for_category(c);
+                    self.download_windows[window_idx].save_dir = dir;
+                }
+                self.spawn_size_probe();
+            }
+            DownloadWindowOutcome::CategoryChanged => {
+                let cat_opt = Category::from_name(&self.download_windows[window_idx].category);
+                if let Some(c) = cat_opt {
+                    let dir = self.resolve_save_dir_for_category(c);
+                    self.download_windows[window_idx].save_dir = dir;
+                }
+            }
+            DownloadWindowOutcome::OpenSettings => {
+                self.show_settings_dialog = true;
+            }
+            DownloadWindowOutcome::Pause => {
+                let wnd = &mut self.download_windows[window_idx];
+                wnd.stage = DownloadWindowStage::Paused;
+                let tid = wnd.task_id.clone();
+                let tid_task = tid.clone();
+                let q = Arc::clone(&self.queue);
+                tokio::spawn(async move {
+                    let _ = q.pause(&tid_task).await;
+                });
+                platform::set_taskbar_progress(platform::TBPF_PAUSED, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == tid) {
+                    d.status = "paused".to_string();
+                }
+            }
+            DownloadWindowOutcome::Resume => {
+                let wnd = &mut self.download_windows[window_idx];
+                wnd.stage = DownloadWindowStage::Downloading;
+                let tid = wnd.task_id.clone();
+                let tid_task = tid.clone();
+                let q = Arc::clone(&self.queue);
+                tokio::spawn(async move {
+                    let _ = q.resume(&tid_task).await;
+                });
+                platform::set_taskbar_progress(platform::TBPF_NORMAL, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == tid) {
+                    d.status = "downloading".to_string();
+                }
+            }
+            DownloadWindowOutcome::RunInBackground => {
+                let target_did = dialog_id.to_string();
+                let _url = self.download_windows[window_idx].url.clone();
+                platform::log_daemon(&format!("STEP: dialog closed and disposed (to background): dialog_id='{}'", target_did));
+                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_did));
+                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                self.download_windows.retain(|w| w.dialog_id != target_did);
+                self.check_pending_dialog_queue(ctx);
+                let any_open = !self.download_windows.is_empty();
+                if !any_open {
+                    if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
+                        // Main window remains open
+                    } else {
+                        let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
+                            || !self.active_progress.is_empty();
+                        if !has_active_downloads {
+                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                                platform::hide_main_window();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            } else {
+                                self.perform_graceful_shutdown();
+                            }
+                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            platform::hide_main_window();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        }
+                    }
+                }
+            }
+            DownloadWindowOutcome::CancelClicked => {
+                let wnd = &mut self.download_windows[window_idx];
+                wnd.confirming_cancel = true;
+            }
+            DownloadWindowOutcome::DismissCancel => {
+                let wnd = &mut self.download_windows[window_idx];
+                wnd.confirming_cancel = false;
+            }
+            DownloadWindowOutcome::ConfirmCancel => {
+                let target_did = dialog_id.to_string();
+                let (tid, target_p, url) = {
+                    let wnd = &self.download_windows[window_idx];
+                    (wnd.task_id.clone(), wnd.target_path.clone(), wnd.url.clone())
+                };
+                platform::log_daemon(&format!("STEP: dialog closed and disposed (ConfirmCancel): dialog_id='{}'", target_did));
+                self.clear_dedupe_keys_for_url(&url);
+                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_did));
+                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                self.download_windows.retain(|w| w.dialog_id != target_did);
+                self.check_pending_dialog_queue(ctx);
+                let tid_task = tid.clone();
+                let q = Arc::clone(&self.queue);
+                let db = self.queue.db().clone();
+                tokio::spawn(async move {
+                    let _ = q.remove(&tid_task, false).await;
+                    let _ = db.update_status(&tid_task, "Canceled", None).await;
+                    let part1 = format!("{}.cosmo.part", target_p);
+                    let part2 = format!("{}.part", target_p);
+                    let _ = std::fs::remove_file(&part1);
+                    let _ = std::fs::remove_file(&part2);
+                    let _ = std::fs::remove_file(&target_p);
+                });
+                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == tid) {
+                    d.status = "Canceled".to_string();
+                }
+                platform::set_taskbar_progress(platform::TBPF_NOPROGRESS, 0, 0);
+
+                let any_open = !self.download_windows.is_empty();
+                if !any_open {
+                    if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
+                        // Main window remains open
+                    } else {
+                        let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
+                            || !self.active_progress.is_empty();
+                        if !has_active_downloads {
+                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                                platform::hide_main_window();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            } else {
+                                self.perform_graceful_shutdown();
+                            }
+                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            platform::hide_main_window();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        }
+                    }
+                }
+            }
+            DownloadWindowOutcome::OpenFile => {
+                let wnd = &self.download_windows[window_idx];
+                platform::shell_open_file(&wnd.target_path);
+            }
+            DownloadWindowOutcome::ShowInFolder => {
+                let wnd = &self.download_windows[window_idx];
+                platform::shell_open_folder_and_select(&wnd.target_path);
+            }
+            DownloadWindowOutcome::Retry => {
+                let wnd = &mut self.download_windows[window_idx];
+                wnd.stage = DownloadWindowStage::Downloading;
+                let tid = wnd.task_id.clone();
+                let q = Arc::clone(&self.queue);
+                tokio::spawn(async move {
+                    let _ = q.resume(&tid).await;
+                });
+                platform::set_taskbar_progress(platform::TBPF_NORMAL, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+            }
+            DownloadWindowOutcome::Close => {
+                let target_did = dialog_id.to_string();
+                let url = self.download_windows[window_idx].url.clone();
+                platform::log_daemon(&format!("STEP: dialog closed and disposed: dialog_id='{}'", target_did));
+                self.clear_dedupe_keys_for_url(&url);
+                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_did));
+                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                self.download_windows.retain(|w| w.dialog_id != target_did);
+                self.check_pending_dialog_queue(ctx);
+                platform::set_taskbar_progress(platform::TBPF_NOPROGRESS, 0, 0);
+
+                let any_open = !self.download_windows.is_empty();
+                if !any_open {
+                    if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
+                        // Main window remains open
+                    } else {
+                        let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
+                            || !self.active_progress.is_empty();
+                        if !has_active_downloads {
+                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                                platform::hide_main_window();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            } else {
+                                self.perform_graceful_shutdown();
+                            }
+                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            platform::hide_main_window();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn trigger_download(&mut self, start_paused: bool) -> bool {
+        if !self.download_windows.is_empty() {
+            let last_idx = self.download_windows.len() - 1;
+            return self.trigger_download_for_window(last_idx, start_paused);
+        }
+        false
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
@@ -841,7 +1505,7 @@ impl CosmoDownloaderApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(640.0, 620.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(760.0, 480.0)));
         ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(Vec2::new(10000.0, 10000.0)));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1000.0, 640.0)));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.to_string()));
@@ -978,6 +1642,16 @@ impl CosmoDownloaderApp {
 }
 
 impl eframe::App for CosmoDownloaderApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let pal = crate::theme::palette(self.is_dark);
+        [
+            pal.surface.r() as f32 / 255.0,
+            pal.surface.g() as f32 / 255.0,
+            pal.surface.b() as f32 / 255.0,
+            1.0,
+        ]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(scale) = self.custom_scale {
             ctx.set_pixels_per_point(scale);
@@ -1072,65 +1746,19 @@ impl eframe::App for CosmoDownloaderApp {
                 self.perform_graceful_shutdown();
             }
 
-            if self.is_progress_popup_mode {
-                self.is_progress_popup_mode = false;
-                self.active_popup_task_id = None;
-                self.restore_main_window_chrome(ctx);
-                if self.tray_icon.is_some() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    platform::hide_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                } else {
-                    self.perform_graceful_shutdown();
-                }
-                return;
-            }
-            if self.is_completed_popup_mode {
-                self.is_completed_popup_mode = false;
-                self.completed_dialog_record = None;
-                self.is_popup_mode = false;
-                self.is_progress_popup_mode = false;
-                self.active_popup_task_id = None;
-                self.popup_opened_at = None;
-                self.restore_main_window_chrome(ctx);
-                if self.tray_icon.is_some() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    platform::hide_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                } else {
-                    self.perform_graceful_shutdown();
-                }
-                return;
-            }
-            if self.is_popup_mode {
-                if let Some(opened) = self.popup_opened_at {
-                    if opened.elapsed() < Duration::from_millis(600) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                        return;
+            if self.is_popup_mode && !self.download_windows.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                let wnd = &mut self.download_windows[0];
+                match wnd.stage {
+                    DownloadWindowStage::Info => {
+                        self.handle_download_window_outcome(0, DownloadWindowOutcome::Close, ctx);
                     }
-                }
-                platform::log_daemon("Download File Info dialog OS close requested");
-                self.is_popup_mode = false;
-                self.is_progress_popup_mode = false;
-                self.is_completed_popup_mode = false;
-                self.completed_dialog_record = None;
-                self.active_popup_task_id = None;
-                self.popup_opened_at = None;
-                self.show_add_dialog = false;
-                self.add_url.clear();
-                self.add_filename.clear();
-                self.restore_main_window_chrome(ctx);
-                if self.is_main_window_open.load(Ordering::Relaxed) {
-                    platform::log_daemon("Main window was open; restoring chrome and keeping visible");
-                    platform::show_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                } else if self.tray_icon.is_some() {
-                    platform::log_daemon("Main window was closed/hidden; hiding window and keeping in background");
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    platform::hide_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                } else {
-                    self.perform_graceful_shutdown();
+                    DownloadWindowStage::Downloading | DownloadWindowStage::Paused => {
+                        self.handle_download_window_outcome(0, DownloadWindowOutcome::RunInBackground, ctx);
+                    }
+                    DownloadWindowStage::Complete | DownloadWindowStage::Failed { .. } => {
+                        self.handle_download_window_outcome(0, DownloadWindowOutcome::Close, ctx);
+                    }
                 }
                 return;
             }
@@ -1147,6 +1775,14 @@ impl eframe::App for CosmoDownloaderApp {
             } else {
                 self.perform_graceful_shutdown();
             }
+        }
+
+        // Receive task ID from window launcher
+        while let Ok((idx, id)) = self.window_task_rx.try_recv() {
+            if idx < self.download_windows.len() {
+                self.download_windows[idx].task_id = id.clone();
+            }
+            self.active_popup_task_id = Some(id);
         }
 
         // Receive task ID
@@ -1176,10 +1812,22 @@ impl eframe::App for CosmoDownloaderApp {
                             self.add_save_dir = self.resolve_save_dir_for_category(cat);
                         }
                     }
+                    if let Some(last_wnd) = self.download_windows.iter_mut().rev().find(|w| w.stage == DownloadWindowStage::Info) {
+                        last_wnd.file_size = sz;
+                        last_wnd.is_probing = false;
+                        if !self.add_filename.is_empty() {
+                            last_wnd.filename = self.add_filename.clone();
+                            last_wnd.category = self.add_category.clone();
+                            last_wnd.save_dir = self.add_save_dir.clone();
+                        }
+                    }
                     clear_probe = true;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.add_is_probing = false;
+                    if let Some(last_wnd) = self.download_windows.iter_mut().rev().find(|w| w.stage == DownloadWindowStage::Info) {
+                        last_wnd.is_probing = false;
+                    }
                     clear_probe = true;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
@@ -1194,6 +1842,10 @@ impl eframe::App for CosmoDownloaderApp {
             match event {
                 QueueEvent::TaskCompleted(id) => {
                     self.refresh_downloads();
+                    let completed_url = self.downloads.iter().find(|d| d.id == id).map(|d| d.url.clone());
+                    if let Some(ref u) = completed_url {
+                        self.clear_dedupe_keys_for_url(u);
+                    }
                     if self.setting_notifications_enabled {
                         let fname = self
                             .downloads
@@ -1206,78 +1858,56 @@ impl eframe::App for CosmoDownloaderApp {
                             &format!("{} finished downloading.", fname),
                         );
                     }
-                    if self.is_progress_popup_mode {
-                        self.is_progress_popup_mode = false;
+                    let mut matched = false;
+                    for wnd in &mut self.download_windows {
+                        if wnd.task_id == id || (wnd.task_id.is_empty() && (wnd.stage == DownloadWindowStage::Downloading || wnd.stage == DownloadWindowStage::Paused)) {
+                            matched = true;
+                            wnd.task_id = id.clone();
+                            wnd.stage = DownloadWindowStage::Complete;
+                            wnd.is_open = true;
+                            if let Some(tot) = wnd.total_bytes {
+                                wnd.downloaded_bytes = tot;
+                                wnd.disp_downloaded = tot;
+                            }
+                            platform::set_taskbar_progress(platform::TBPF_NOPROGRESS, 0, 0);
+                            if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                                #[cfg(windows)]
+                                platform::show_main_window();
+                            } else if self.is_popup_mode {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            }
+                            break;
+                        }
                     }
-                    if !self.setting_dont_show_complete_dialog {
-                        let record = self.downloads.iter().find(|d| d.id == id).cloned().unwrap_or_else(|| {
-                            let mut resolved_target = self.active_popup_target_path.clone();
-                            let p = Path::new(&resolved_target);
-                            if !p.exists() {
-                                if let Some(parent) = p.parent() {
-                                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                                        if let Ok(entries) = std::fs::read_dir(parent) {
-                                            for entry in entries.flatten() {
-                                                let ep = entry.path();
-                                                if ep.is_file() {
-                                                    if let Some(name) = ep.file_name().and_then(|n| n.to_str()) {
-                                                        if name.starts_with(stem) && !name.ends_with(".part") && !name.ends_with(".ytdl") {
-                                                            resolved_target = ep.to_string_lossy().to_string();
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                    if !matched && !self.setting_dont_show_complete_dialog {
+                        if let Some(rec) = self.downloads.iter().find(|d| d.id == id).cloned() {
+                            let mut wnd = DownloadWindowState::new(rec.url, rec.filename, rec.category, rec.target_path.clone());
+                            wnd.task_id = id.clone();
+                            wnd.target_path = rec.target_path;
+                            wnd.downloaded_bytes = rec.downloaded_bytes;
+                            wnd.total_bytes = rec.total_size;
+                            wnd.disp_downloaded = rec.downloaded_bytes;
+                            wnd.disp_total = rec.total_size;
+                            wnd.stage = DownloadWindowStage::Complete;
+                            wnd.is_open = true;
+                            self.download_windows.push(wnd);
+                            if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                                #[cfg(windows)]
+                                platform::show_main_window();
+                            } else if self.is_popup_mode {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                             }
-                            let (size, bytes) = if let Ok(meta) = std::fs::metadata(&resolved_target) {
-                                (Some(meta.len()), meta.len())
-                            } else {
-                                (None, 0)
-                            };
-                            let cat_str = categorize(Some(&resolved_target), None).name().to_string();
-                            DownloadRecord {
-                                id: id.clone(),
-                                url: self.active_popup_url.clone(),
-                                filename: Path::new(&resolved_target)
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or(&self.active_popup_filename)
-                                    .to_string(),
-                                target_path: resolved_target,
-                                part_path: String::new(),
-                                category: cat_str,
-                                total_size: size,
-                                downloaded_bytes: bytes,
-                                status: "completed".to_string(),
-                                num_segments: 8,
-                                expected_sha256: None,
-                                custom_headers: None,
-                                user_agent: None,
-                                referer: None,
-                                cookie: None,
-                                max_speed_bps: 0,
-                                retry_count: 0,
-                                max_retries: 3,
-                                error_message: None,
-                                created_at: chrono::Utc::now().to_rfc3339(),
-                                updated_at: chrono::Utc::now().to_rfc3339(),
-                            }
-                        });
-                        self.completed_dialog_record = Some(record);
-                        self.is_completed_popup_mode = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(560.0, 260.0)));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Title("Download complete".to_string()));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                        #[cfg(windows)]
-                        platform::make_popup_topmost();
+                        }
                     }
                 }
                 QueueEvent::TaskAdded(_) => {
@@ -1285,6 +1915,10 @@ impl eframe::App for CosmoDownloaderApp {
                 }
                 QueueEvent::TaskFailed { id, error } => {
                     self.refresh_downloads();
+                    let failed_url = self.downloads.iter().find(|d| d.id == id).map(|d| d.url.clone());
+                    if let Some(ref u) = failed_url {
+                        self.clear_dedupe_keys_for_url(u);
+                    }
                     if self.setting_notifications_enabled {
                         let fname = self
                             .downloads
@@ -1297,11 +1931,37 @@ impl eframe::App for CosmoDownloaderApp {
                             &format!("{}: {}", fname, error),
                         );
                     }
+                    for wnd in &mut self.download_windows {
+                        if wnd.task_id == id || (wnd.task_id.is_empty() && wnd.stage == DownloadWindowStage::Downloading) {
+                            wnd.task_id = id.clone();
+                            wnd.stage = DownloadWindowStage::Failed { reason: error.clone() };
+                            wnd.is_open = true;
+                            platform::set_taskbar_progress(platform::TBPF_ERROR, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            break;
+                        }
+                    }
                 }
                 QueueEvent::StatusChanged { id, status } => {
                     if status == "completed" || status == "paused" || status == "failed" {
                         self.active_progress.remove(&id);
                         self.ema_speeds.remove(&id);
+                    }
+                    for wnd in &mut self.download_windows {
+                        if wnd.task_id == id {
+                            if status == "paused" && wnd.stage == DownloadWindowStage::Downloading {
+                                wnd.stage = DownloadWindowStage::Paused;
+                                platform::set_taskbar_progress(platform::TBPF_PAUSED, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                            } else if (status == "downloading" || status == "resumed") && wnd.stage == DownloadWindowStage::Paused {
+                                wnd.stage = DownloadWindowStage::Downloading;
+                                platform::set_taskbar_progress(platform::TBPF_NORMAL, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                            } else if status == "completed" {
+                                wnd.stage = DownloadWindowStage::Complete;
+                                wnd.is_open = true;
+                                platform::set_taskbar_progress(platform::TBPF_NOPROGRESS, 0, 0);
+                            }
+                        }
                     }
                     self.refresh_downloads();
                 }
@@ -1313,7 +1973,23 @@ impl eframe::App for CosmoDownloaderApp {
                         current_speed
                     };
                     self.ema_speeds.insert(id.clone(), smoothed);
-                    self.active_progress.insert(id, progress);
+                    self.active_progress.insert(id.clone(), progress.clone());
+
+                    for wnd in &mut self.download_windows {
+                        if wnd.task_id == id || (wnd.task_id.is_empty() && wnd.stage == DownloadWindowStage::Downloading) {
+                            if wnd.task_id.is_empty() {
+                                wnd.task_id = id.clone();
+                            }
+                            wnd.update_progress(progress.downloaded_bytes, progress.total_bytes, std::time::Instant::now());
+                            let flags = if wnd.stage == DownloadWindowStage::Paused {
+                                platform::TBPF_PAUSED
+                            } else {
+                                platform::TBPF_NORMAL
+                            };
+                            platform::set_taskbar_progress(flags, wnd.disp_downloaded, wnd.disp_total.unwrap_or(0));
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1321,12 +1997,10 @@ impl eframe::App for CosmoDownloaderApp {
         // External show requests
         while self.show_rx.try_recv().is_ok() {
             platform::log_daemon("Received show request via bridge (/show)");
-            if self.is_popup_mode || self.is_progress_popup_mode || self.is_completed_popup_mode {
+            if self.is_popup_mode {
                 continue;
             }
             self.is_popup_mode = false;
-            self.is_progress_popup_mode = false;
-            self.is_completed_popup_mode = false;
             self.restore_main_window_chrome(ctx);
             platform::show_main_window();
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -1338,409 +2012,208 @@ impl eframe::App for CosmoDownloaderApp {
 
         // Browser extension download requests
         while let Ok(req) = self.browser_dl_rx.try_recv() {
-            platform::log_daemon(&format!("Browser extension download request received: {}", req.url));
-            self.prepare_download_dialog(
-                &req.url,
-                req.filename,
-                req.cookies,
-                req.referer,
-                req.user_agent,
-                req.num_segments,
-            );
-            if self.is_main_window_open.load(Ordering::Relaxed) {
-                platform::log_daemon("Main window is already open; presenting download info as modal in main window");
-                self.show_add_dialog = true;
-                self.is_popup_mode = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                #[cfg(windows)]
-                platform::show_main_window();
-            } else {
-                platform::log_daemon("Main window is closed/hidden; presenting download info as standalone popup");
-                self.is_popup_mode = true;
-                self.popup_opened_at = Some(std::time::Instant::now());
-                self.is_progress_popup_mode = false;
-                self.is_completed_popup_mode = false;
-                self.completed_dialog_record = None;
-                self.active_popup_task_id = None;
-                self.show_add_dialog = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(560.0, 350.0)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(560.0, 350.0)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(Vec2::new(560.0, 350.0)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(DOWNLOAD_FILE_INFO_TITLE.to_string()));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                #[cfg(windows)]
-                platform::make_popup_topmost();
-            }
+            platform::log_daemon(&format!("STEP: extension request received on UI thread: url='{}'", req.url));
+            let dialog_req = DownloadDialogRequest {
+                url: req.url,
+                filename: req.filename,
+                cookies: req.cookies,
+                referer: req.referer,
+                user_agent: req.user_agent,
+                num_segments: req.num_segments,
+            };
+            self.show_download_dialog(dialog_req, "extension", Some(ctx));
         }
 
         // Clipboard events
         while let Ok(url) = self.clipboard_rx.try_recv() {
             if self.setting_clipboard_monitor {
                 platform::log_daemon(&format!("Clipboard monitor detected URL: {}", url));
-                self.prepare_download_dialog(&url, None, None, None, None, None);
-                if self.is_main_window_open.load(Ordering::Relaxed) {
-                    platform::log_daemon("Main window is already open; presenting clipboard download info as modal in main window");
-                    self.show_add_dialog = true;
-                    self.is_popup_mode = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    #[cfg(windows)]
-                    platform::show_main_window();
-                } else {
-                    platform::log_daemon("Main window is closed/hidden; presenting clipboard download info as standalone popup");
-                    self.is_popup_mode = true;
-                    self.popup_opened_at = Some(std::time::Instant::now());
-                    self.is_progress_popup_mode = false;
-                    self.is_completed_popup_mode = false;
-                    self.completed_dialog_record = None;
-                    self.active_popup_task_id = None;
-                    self.show_add_dialog = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(560.0, 350.0)));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(560.0, 350.0)));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(Vec2::new(560.0, 350.0)));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(DOWNLOAD_FILE_INFO_TITLE.to_string()));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                    #[cfg(windows)]
-                    platform::make_popup_topmost();
-                }
+                let dialog_req = DownloadDialogRequest {
+                    url,
+                    filename: None,
+                    cookies: None,
+                    referer: None,
+                    user_agent: None,
+                    num_segments: None,
+                };
+                self.show_download_dialog(dialog_req, "clipboard", Some(ctx));
             }
         }
 
         // Tray actions
-        if let Some(ref rx) = self.tray_event_receiver {
+        let tray_actions: Vec<String> = if let Some(ref rx) = self.tray_event_receiver {
+            let mut acts = Vec::new();
             while let Ok(action) = rx.try_recv() {
-                match action.as_str() {
-                    "show" => {
-                        platform::log_daemon("Tray action: show main window");
-                        self.is_popup_mode = false;
-                        self.is_progress_popup_mode = false;
-                        self.is_completed_popup_mode = false;
-                        self.restore_main_window_chrome(ctx);
-                        platform::show_main_window();
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                        self.is_main_window_open.store(true, Ordering::Relaxed);
-                    }
-                    "add" => {
-                        platform::log_daemon("Tray action: add URL in main window");
-                        self.is_popup_mode = false;
-                        self.is_progress_popup_mode = false;
-                        self.is_completed_popup_mode = false;
-                        self.restore_main_window_chrome(ctx);
-                        platform::show_main_window();
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        self.show_add_dialog = true;
-                        self.is_main_window_open.store(true, Ordering::Relaxed);
-                    }
-                    "exit" => {
-                        self.perform_graceful_shutdown();
-                    }
-                    _ => {}
+                acts.push(action);
+            }
+            acts
+        } else {
+            Vec::new()
+        };
+        for action in tray_actions {
+            match action.as_str() {
+                "show" => {
+                    platform::log_daemon("Tray action: show main window");
+                    self.is_popup_mode = false;
+                    self.restore_main_window_chrome(ctx);
+                    platform::show_main_window();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                    self.is_main_window_open.store(true, Ordering::Relaxed);
                 }
+                "add" => {
+                    platform::log_daemon("Tray action: add URL");
+                    self.show_download_dialog(DownloadDialogRequest::empty(), "tray", Some(ctx));
+                }
+                "exit" => {
+                    self.perform_graceful_shutdown();
+                }
+                _ => {}
             }
         }
 
-        // Standalone Progress Mode
-        if self.is_progress_popup_mode {
-            egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(pal.surface).inner_margin(Margin::same(16.0)))
-                .show(ctx, |ui| {
-                    let task_id = self.active_popup_task_id.clone();
-                    let fname = if !self.active_popup_filename.is_empty() {
-                        self.active_popup_filename.clone()
-                    } else {
-                        "Downloading file...".to_string()
-                    };
-                    let prog = task_id.as_ref().and_then(|id| self.active_progress.get(id));
-                    let is_paused = task_id.as_ref().is_some_and(|id| {
-                        self.downloads.iter().any(|d| &d.id == id && d.status == "paused")
-                    });
-
-                    let outcome = render_progress_dialog(ui, pal, &fname, &self.active_popup_target_path, prog, is_paused);
-                    if outcome.toggle_pause {
-                        if let Some(ref id) = task_id {
-                            let id_c = id.clone();
-                            let q_c = Arc::clone(&self.queue);
-                            tokio::spawn(async move {
-                                if is_paused {
-                                    let _ = q_c.resume(&id_c).await;
-                                } else {
-                                    let _ = q_c.pause(&id_c).await;
-                                }
-                            });
-                        }
-                    }
-                    if outcome.cancel {
-                        if let Some(ref id) = task_id {
-                            let id_c = id.clone();
-                            let q_c = Arc::clone(&self.queue);
-                            tokio::spawn(async move {
-                                let _ = q_c.remove(&id_c, false).await;
-                            });
-                        }
-                        self.is_progress_popup_mode = false;
-                        self.active_popup_task_id = None;
-                        if self.is_main_window_open.load(Ordering::Relaxed) {
-                            self.restore_main_window_chrome(ctx);
-                            platform::show_main_window();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        } else {
-                            self.restore_main_window_chrome(ctx);
-                            if self.tray_icon.is_some() {
-                                platform::hide_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            } else {
-                                self.perform_graceful_shutdown();
-                            }
-                        }
-                    }
-                    if outcome.close {
-                        self.is_progress_popup_mode = false;
-                        if self.is_main_window_open.load(Ordering::Relaxed) {
-                            self.restore_main_window_chrome(ctx);
-                            platform::show_main_window();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        } else {
-                            self.restore_main_window_chrome(ctx);
-                            if self.tray_icon.is_some() {
-                                platform::hide_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            } else {
-                                self.perform_graceful_shutdown();
-                            }
-                        }
-                    }
-                });
-            return;
-        }
-
-        // Standalone Complete Mode
-        if self.is_completed_popup_mode && self.completed_dialog_record.is_some() {
-            egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(pal.surface).inner_margin(Margin::same(16.0)))
-                .show(ctx, |ui| {
-                    if let Some(ref record) = self.completed_dialog_record {
-                        let outcome = render_complete_dialog(ui, pal, record);
-                        if outcome.close {
-                            self.is_completed_popup_mode = false;
-                            self.completed_dialog_record = None;
-                            if self.is_main_window_open.load(Ordering::Relaxed) {
-                                self.restore_main_window_chrome(ctx);
-                                platform::show_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            } else {
-                                self.restore_main_window_chrome(ctx);
-                                if self.tray_icon.is_some() {
-                                    platform::hide_main_window();
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                                } else {
-                                    self.perform_graceful_shutdown();
-                                }
-                            }
-                        }
-                    }
-                });
-            return;
-        }
-
-        // Standalone Popup File Info Mode
+        // Standalone Popup File Info Mode (IDM-style unified window)
         if self.is_popup_mode {
-            let mut outcome = AddDialogOutcome {
-                start_now: false,
-                download_later: false,
-                cancel: false,
-                open_settings: false,
-                url_changed: false,
-                category_changed: false,
-            };
+            if std::env::args().any(|a| {
+                let clean = a.trim_matches('"').trim_matches('\'');
+                clean == "--view=cascade" || clean == "--view=cascade_canvas"
+            }) {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(pal.bg))
+                    .show(ctx, |ui| {
+                        if self.download_windows.len() >= 2 {
+                            ui.push_id("cascade_card_0", |ui| {
+                                crate::dialogs::download_window::render_download_window_card(
+                                    ui,
+                                    ctx,
+                                    pal,
+                                    self.logo_texture.as_ref(),
+                                    &mut self.download_windows[0],
+                                    Pos2::new(20.0, 20.0),
+                                );
+                            });
+                            ui.push_id("cascade_card_1", |ui| {
+                                crate::dialogs::download_window::render_download_window_card(
+                                    ui,
+                                    ctx,
+                                    pal,
+                                    self.logo_texture.as_ref(),
+                                    &mut self.download_windows[1],
+                                    Pos2::new(44.0, 44.0),
+                                );
+                            });
+                        }
+                    });
+                return;
+            }
 
-            let mut dlg_state = AddDialogState {
-                url: &mut self.add_url,
-                filename: &mut self.add_filename,
-                category: &mut self.add_category,
-                save_dir: &mut self.add_save_dir,
-                connections: &mut self.add_connections,
-                speed_limit_kb: &mut self.add_speed_limit_kb,
-                checksum: &mut self.add_checksum,
-                remember_category: &mut self.add_remember_category,
-                description: &mut self.add_description,
-                file_size: self.add_file_size,
-                is_probing: self.add_is_probing,
-                error_message: self.add_error_message.as_deref(),
-                show_notes_expanded: &mut self.show_notes_expanded,
-                show_advanced_expanded: &mut self.show_advanced_add,
-            };
+            if self.download_windows.is_empty() {
+                return;
+            }
 
-            // Title bar: fixed height 36 = logo + title + close button
-            let title_act = egui::TopBottomPanel::top("popup_title_bar")
-                .resizable(false)
-                .exact_height(36.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(pal.raise)
-                        .inner_margin(Margin::ZERO),
-                )
-                .show(ctx, |ui| {
-                    title_bar::render_title_bar(
-                        ui,
+            let mut outcomes: Vec<(String, DownloadWindowOutcome)> = Vec::new();
+
+            // The first active dialog renders in the root window
+            let root_dialog_id = self.download_windows[0].dialog_id.clone();
+            platform::log_daemon(&format!("STEP: dialog shown on main window: dialog_id='{}'", root_dialog_id));
+            let outcome = {
+                let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    render_download_window_content(
                         ctx,
                         pal,
                         self.logo_texture.as_ref(),
-                        DOWNLOAD_FILE_INFO_TITLE,
+                        &mut self.download_windows[0],
                     )
-                })
-                .inner;
-            if title_act.close {
-                outcome.cancel = true;
+                }));
+                match render_result {
+                    Ok(out) => out,
+                    Err(err) => {
+                        platform::log_daemon(&format!("ERROR: Panic rendering main window dialog_id='{}': {:?}", root_dialog_id, err));
+                        DownloadWindowOutcome::Close
+                    }
+                }
+            };
+            outcomes.push((root_dialog_id, outcome));
+
+            // Render any additional open download windows in child viewports
+            for idx in 1..self.download_windows.len() {
+                if self.download_windows[idx].is_open {
+                    let dialog_id = self.download_windows[idx].dialog_id.clone();
+                    let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", dialog_id));
+                    let mut vp_builder = egui::ViewportBuilder::default()
+                        .with_title(DOWNLOAD_FILE_INFO_TITLE)
+                        .with_inner_size(Vec2::new(
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                        ))
+                        .with_min_inner_size(Vec2::new(
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                        ))
+                        .with_max_inner_size(Vec2::new(
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                            crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                        ))
+                        .with_transparent(false)
+                        .with_resizable(false)
+                        .with_decorations(false)
+                        .with_always_on_top();
+
+                    if let Some(pos) = self.download_windows[idx].window_pos {
+                        vp_builder = vp_builder.with_position(pos);
+                    }
+
+                    let mut child_outcome = DownloadWindowOutcome::None;
+                    platform::log_daemon(&format!("STEP: dialog shown on child viewport: idx={}, dialog_id='{}'", idx, dialog_id));
+                    ctx.show_viewport_immediate(vp_id, vp_builder, |child_ctx, _class| {
+                        let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            render_download_window_content(
+                                child_ctx,
+                                pal,
+                                self.logo_texture.as_ref(),
+                                &mut self.download_windows[idx],
+                            )
+                        }));
+                        match render_result {
+                            Ok(out) => {
+                                child_outcome = out;
+                            }
+                            Err(err) => {
+                                platform::log_daemon(&format!("ERROR: Panic rendering child viewport idx={}: {:?}", idx, err));
+                                egui::CentralPanel::default()
+                                    .frame(egui::Frame::none().fill(pal.surface).inner_margin(Margin::same(24.0)))
+                                    .show(child_ctx, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.add_space(50.0);
+                                            ui.heading("Couldn't open the download window");
+                                            ui.add_space(16.0);
+                                            ui.label("An error occurred while preparing this download dialog.");
+                                            ui.add_space(24.0);
+                                            if ui.button("Close").clicked() {
+                                                child_outcome = DownloadWindowOutcome::Close;
+                                            }
+                                        });
+                                    });
+                            }
+                        }
+                    });
+                    outcomes.push((dialog_id, child_outcome));
+                }
             }
 
-            // Footer: fixed height 59 = 1px top border + 12 padding + 34 buttons + 12 padding.
-            egui::TopBottomPanel::bottom("popup_footer")
-                .resizable(false)
-                .exact_height(59.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(pal.surface)
-                        .inner_margin(Margin { left: 24.0, right: 24.0, top: 0.0, bottom: 0.0 }),
-                )
-                .show(ctx, |ui| {
-                    render_add_download_footer(ui, pal, &dlg_state, &mut outcome);
-                });
-
-            // Body: padding 20 top, 24 left/right, 16 bottom
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::none()
-                        .fill(pal.surface)
-                        .inner_margin(Margin { left: 24.0, right: 24.0, top: 20.0, bottom: 16.0 }),
-                )
-                .show(ctx, |ui| {
-                    render_add_download_body(ui, pal, &mut dlg_state, &mut outcome);
-                });
-
-                    if outcome.url_changed {
-                        self.add_error_message = None;
-                        if let Some(c) = Category::from_name(&self.add_category) {
-                            self.add_save_dir = self.resolve_save_dir_for_category(c);
-                        }
-                        self.spawn_size_probe();
-                    }
-                    if outcome.category_changed {
-                        if let Some(c) = Category::from_name(&self.add_category) {
-                            self.add_save_dir = self.resolve_save_dir_for_category(c);
-                        }
-                    }
-
-                    if outcome.open_settings {
-                        self.show_settings_dialog = true;
-                    }
-                    if outcome.download_later {
-                        platform::log_daemon("Download File Info: 'Download later' clicked");
-                        if self.trigger_download(true) {
-                            self.is_popup_mode = false;
-                            self.popup_opened_at = None;
-                            if self.is_main_window_open.load(Ordering::Relaxed) {
-                                platform::log_daemon("Main window was open; restoring chrome and keeping visible");
-                                self.restore_main_window_chrome(ctx);
-                                platform::show_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            } else {
-                                platform::log_daemon("Main window was closed/hidden; hiding window and keeping in background");
-                                self.restore_main_window_chrome(ctx);
-                                if self.tray_icon.is_some() {
-                                    platform::hide_main_window();
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                                } else {
-                                    self.perform_graceful_shutdown();
-                                }
-                            }
-                        }
-                    }
-                    if outcome.start_now {
-                        let fname = if !self.add_filename.trim().is_empty() {
-                            self.add_filename.trim().to_string()
-                        } else {
-                            self.add_url.split('/').last().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
-                        };
-                        platform::log_daemon(&format!("Download File Info: 'Start download' clicked for '{}'", fname));
-                        if self.trigger_download(false) {
-                            self.is_popup_mode = false;
-                            self.popup_opened_at = None;
-                            platform::show_desktop_notification("Cosmo Downloader", &format!("Download started: {}", fname));
-
-                            if self.setting_open_main_on_download_start {
-                                platform::log_daemon("Setting 'open_main_on_download_start' is ON; opening main window");
-                                self.restore_main_window_chrome(ctx);
-                                platform::show_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                                self.is_main_window_open.store(true, Ordering::Relaxed);
-                            } else if self.is_main_window_open.load(Ordering::Relaxed) {
-                                platform::log_daemon("Main window was open; keeping main window open");
-                                self.restore_main_window_chrome(ctx);
-                                platform::show_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            } else {
-                                platform::log_daemon("Setting 'open_main_on_download_start' is OFF and main window was closed/hidden; hiding window and keeping in background");
-                                self.restore_main_window_chrome(ctx);
-                                if self.tray_icon.is_some() {
-                                    platform::hide_main_window();
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                                } else {
-                                    self.perform_graceful_shutdown();
-                                }
-                            }
-                        }
-                    }
-                    if outcome.cancel {
-                        platform::log_daemon("Download File Info: 'Cancel' clicked");
-                        self.show_add_dialog = false;
-                        self.add_url.clear();
-                        self.add_filename.clear();
-                        self.add_error_message = None;
-                        self.add_is_probing = false;
-                        self.size_probe_rx = None;
-                        self.is_popup_mode = false;
-                        self.popup_opened_at = None;
-                        if self.is_main_window_open.load(Ordering::Relaxed) {
-                            platform::log_daemon("Main window was open; restoring chrome and keeping visible");
-                            self.restore_main_window_chrome(ctx);
-                            platform::show_main_window();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        } else {
-                            platform::log_daemon("Main window was closed/hidden; hiding window and keeping in background");
-                            self.restore_main_window_chrome(ctx);
-                            if self.tray_icon.is_some() {
-                                platform::hide_main_window();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            } else {
-                                self.perform_graceful_shutdown();
-                            }
-                        }
-                    }
+            for (did, out) in outcomes {
+                self.handle_download_window_outcome_by_id(&did, out, ctx);
+            }
             return;
         }
 
         // ====================================================================
         // Full Dashboard View (Matches User's HTML UI)
         // ====================================================================
-        if !self.show_add_dialog && !self.show_settings_dialog {
+        let any_dialog_open = self.download_windows.iter().any(|w| w.is_open);
+        if !self.show_add_dialog && !self.show_settings_dialog && !any_dialog_open {
             self.handle_borderless_resize(ctx);
         }
 
@@ -1772,10 +2245,19 @@ impl eframe::App for CosmoDownloaderApp {
         let modal_open = self.show_add_dialog
             || self.show_settings_dialog
             || self.show_about_dialog
-            || !self.pending_delete_ids.is_empty();
+            || !self.pending_delete_ids.is_empty()
+            || self.download_windows.iter().any(|w| w.is_open);
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if !self.pending_delete_ids.is_empty() {
                 self.pending_delete_ids.clear();
+            } else if let Some(last_open_idx) = self.download_windows.iter().rposition(|w| w.is_open) {
+                let did = self.download_windows[last_open_idx].dialog_id.clone();
+                let outcome = match self.download_windows[last_open_idx].stage {
+                    DownloadWindowStage::Info => DownloadWindowOutcome::Close,
+                    DownloadWindowStage::Downloading | DownloadWindowStage::Paused => DownloadWindowOutcome::CancelClicked,
+                    _ => DownloadWindowOutcome::Close,
+                };
+                self.handle_download_window_outcome_by_id(&did, outcome, ctx);
             } else if self.show_add_dialog {
                 self.show_add_dialog = false;
                 self.add_error_message = None;
@@ -1788,8 +2270,7 @@ impl eframe::App for CosmoDownloaderApp {
             }
         } else if !modal_open && !ctx.wants_keyboard_input() {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::N)) {
-                self.add_error_message = None;
-                self.show_add_dialog = true;
+                self.show_download_dialog(DownloadDialogRequest::empty(), "shortcut_ctrl_n", Some(ctx));
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
                 for id in &filtered_ids {
                     self.selected_ids.insert(id.clone());
@@ -1850,7 +2331,7 @@ impl eframe::App for CosmoDownloaderApp {
                     self.hover_menu_name.as_deref(),
                 );
                 if m_act.add_download {
-                    self.show_add_dialog = true;
+                    self.show_download_dialog(DownloadDialogRequest::empty(), "menu_bar", Some(ctx));
                 }
                 if m_act.exit_app {
                     self.perform_graceful_shutdown();
@@ -1917,8 +2398,7 @@ impl eframe::App for CosmoDownloaderApp {
                     &mut self.search_query,
                 );
                 if tb.add_clicked {
-                    self.add_error_message = None;
-                    self.show_add_dialog = true;
+                    self.show_download_dialog(DownloadDialogRequest::empty(), "toolbar", Some(ctx));
                 }
                 if tb.resume_clicked {
                     if self.selected_ids.is_empty() {
@@ -2083,8 +2563,7 @@ impl eframe::App for CosmoDownloaderApp {
                     &mut self.sort_asc,
                 );
                 if tbl_action.add_download_clicked {
-                    self.add_error_message = None;
-                    self.show_add_dialog = true;
+                    self.show_download_dialog(DownloadDialogRequest::empty(), "empty_state", Some(ctx));
                 }
                 if !tbl_action.request_delete_ids.is_empty() {
                     self.pending_delete_ids = tbl_action.request_delete_ids;
@@ -2151,140 +2630,7 @@ impl eframe::App for CosmoDownloaderApp {
             }
         }
 
-        // Add Download Modal Dialog
-        if self.show_add_dialog && !self.is_popup_mode {
-            // Draw modal backdrop scrim over main window to prevent bleed-through
-            let screen_rect = ctx.screen_rect();
-            egui::Area::new(egui::Id::new("modal_backdrop_scrim"))
-                .order(egui::Order::Middle)
-                .fixed_pos(screen_rect.min)
-                .interactable(true)
-                .show(ctx, |ui| {
-                    let (_, rect) = ui.allocate_space(screen_rect.size());
-                    ui.painter().rect_filled(
-                        rect,
-                        0.0,
-                        egui::Color32::from_black_alpha(130),
-                    );
-                });
-
-            egui::Window::new(DOWNLOAD_FILE_INFO_TITLE)
-                .title_bar(false)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(Vec2::new(560.0, 350.0))
-                .min_size(Vec2::new(560.0, 350.0))
-                .max_size(Vec2::new(560.0, 350.0))
-                .frame(
-                    egui::Frame::none()
-                        .fill(pal_refresh.surface)
-                        .stroke(Stroke::new(1.0_f32, pal_refresh.line))
-                        .inner_margin(Margin::ZERO)
-                        .rounding(shapes::R),
-                )
-                .show(ctx, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.set_width(560.0);
-                    ui.set_height(350.0);
-                    ui.set_max_width(560.0);
-                    ui.set_max_height(350.0);
-                    let title_act = title_bar::render_title_bar(
-                        ui,
-                        ctx,
-                        pal_refresh,
-                        self.logo_texture.as_ref(),
-                        DOWNLOAD_FILE_INFO_TITLE,
-                    );
-                    let mut dlg_state = AddDialogState {
-                        url: &mut self.add_url,
-                        filename: &mut self.add_filename,
-                        category: &mut self.add_category,
-                        save_dir: &mut self.add_save_dir,
-                        connections: &mut self.add_connections,
-                        speed_limit_kb: &mut self.add_speed_limit_kb,
-                        checksum: &mut self.add_checksum,
-                        remember_category: &mut self.add_remember_category,
-                        description: &mut self.add_description,
-                        file_size: self.add_file_size,
-                        is_probing: self.add_is_probing,
-                        error_message: self.add_error_message.as_deref(),
-                        show_notes_expanded: &mut self.show_notes_expanded,
-                        show_advanced_expanded: &mut self.show_advanced_add,
-                    };
-                    let mut outcome = render_add_download_dialog(ui, pal_refresh, &mut dlg_state, self.logo_texture.as_ref());
-                    if title_act.close {
-                        outcome.cancel = true;
-                    }
-                    if outcome.url_changed {
-                        self.add_error_message = None;
-                        if let Some(c) = Category::from_name(&self.add_category) {
-                            self.add_save_dir = self.resolve_save_dir_for_category(c);
-                        }
-                        self.spawn_size_probe();
-                    }
-                    if outcome.category_changed {
-                        if let Some(c) = Category::from_name(&self.add_category) {
-                            self.add_save_dir = self.resolve_save_dir_for_category(c);
-                        }
-                    }
-                    if outcome.open_settings {
-                        self.show_settings_dialog = true;
-                    }
-                    if outcome.download_later && self.trigger_download(true) {
-                        self.show_add_dialog = false;
-                    }
-                    if outcome.start_now {
-                        let fname = if !self.add_filename.trim().is_empty() {
-                            self.add_filename.trim().to_string()
-                        } else {
-                            self.add_url.split('/').last().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
-                        };
-                        if self.trigger_download(false) {
-                            self.show_add_dialog = false;
-                            platform::show_desktop_notification("Cosmo Downloader", &format!("Download started: {}", fname));
-                        }
-                    }
-                    if outcome.cancel {
-                        self.show_add_dialog = false;
-                        self.add_url.clear();
-                        self.add_filename.clear();
-                        self.add_error_message = None;
-                        self.add_is_probing = false;
-                        self.size_probe_rx = None;
-                    }
-                });
-        }
-
-        // Complete Modal Dialog
-        let mut close_complete_dialog = false;
-        if let Some(ref record) = self.completed_dialog_record {
-            if !self.is_completed_popup_mode {
-                egui::Window::new("Download Complete")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                    .frame(
-                        egui::Frame::none()
-                            .fill(pal_refresh.surface)
-                            .stroke(Stroke::new(1.0_f32, pal_refresh.line))
-                            .inner_margin(Margin::same(18.0))
-                            .rounding(shapes::R),
-                    )
-                    .show(ctx, |ui| {
-                        ui.set_width(520.0);
-                        let outcome = render_complete_dialog(ui, pal_refresh, record);
-                        if outcome.close {
-                            close_complete_dialog = true;
-                        }
-                    });
-            }
-        }
-        if close_complete_dialog {
-            self.completed_dialog_record = None;
-        }
-
-        // Options / Settings Modal Dialog
+        // Options / Settings Modal Dialog (Rendered below download dialogs)
         if self.show_settings_dialog {
             egui::Window::new("Options")
                 .collapsible(false)
@@ -2365,6 +2711,34 @@ impl eframe::App for CosmoDownloaderApp {
                         platform::set_autostart_enabled(autostart, start_min);
                     }
                 });
+        }
+
+        // Render open download windows (IDM-style unified window, Foreground order, always on top)
+        let any_dialog_open = self.download_windows.iter().any(|w| w.is_open);
+        if any_dialog_open {
+            let screen_rect = ctx.screen_rect();
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dl_modal_backdrop")))
+                .rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(110));
+        }
+
+        let mut child_outcomes: Vec<(String, DownloadWindowOutcome)> = Vec::new();
+        for idx in 0..self.download_windows.len() {
+            if self.download_windows[idx].is_open {
+                let dialog_id = self.download_windows[idx].dialog_id.clone();
+                let cascade_offset = (idx as f32) * 24.0;
+                platform::log_daemon(&format!("STEP: dialog shown on main window modal: idx={}, dialog_id='{}'", idx, dialog_id));
+                let outcome = render_download_window_modal(
+                    ctx,
+                    &pal_refresh,
+                    self.logo_texture.as_ref(),
+                    &mut self.download_windows[idx],
+                    cascade_offset,
+                );
+                child_outcomes.push((dialog_id, outcome));
+            }
+        }
+        for (did, out) in child_outcomes {
+            self.handle_download_window_outcome_by_id(&did, out, ctx);
         }
 
         // About Modal Dialog

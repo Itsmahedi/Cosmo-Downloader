@@ -84,7 +84,6 @@ pub fn configure_m3_visuals(ctx: &egui::Context) {
 pub fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    #[cfg(windows)]
     let font_specs: &[(&str, &[&str])] = &[
         ("Segoe UI", &["segoeui.ttf"]),
         ("Nirmala UI", &["Nirmala.ttc", "NirmalaB.ttc", "NirmalaS.ttc"]),
@@ -96,12 +95,29 @@ pub fn configure_fonts(ctx: &egui::Context) {
         ("Segoe UI Symbol", &["seguisym.ttf"]),
     ];
 
+    let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
     #[cfg(windows)]
     {
-        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let fonts_dir = std::path::Path::new(&windir).join("Fonts");
+        if let Ok(root) = std::env::var("SystemRoot") {
+            candidate_dirs.push(std::path::Path::new(&root).join("Fonts"));
+        }
+        if let Ok(windir) = std::env::var("windir") {
+            candidate_dirs.push(std::path::Path::new(&windir).join("Fonts"));
+        }
+        candidate_dirs.push(std::path::PathBuf::from("C:\\Windows\\Fonts"));
+    }
+    #[cfg(not(windows))]
+    {
+        candidate_dirs.push(std::path::PathBuf::from("/mnt/c/Windows/Fonts"));
+        candidate_dirs.push(std::path::PathBuf::from("/usr/share/fonts"));
+    }
 
-        for (family_name, file_candidates) in font_specs {
+    for (family_name, file_candidates) in font_specs {
+        let mut loaded = false;
+        for fonts_dir in &candidate_dirs {
+            if loaded {
+                break;
+            }
             for filename in *file_candidates {
                 let font_path = fonts_dir.join(filename);
                 if font_path.exists() {
@@ -116,6 +132,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
                         if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
                             mono.push(family_name.to_string());
                         }
+                        loaded = true;
                         break;
                     }
                 }

@@ -24,10 +24,10 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
+uuid = { workspace = true }
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 

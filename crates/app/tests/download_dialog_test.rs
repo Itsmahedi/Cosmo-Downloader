@@ -14,18 +14,18 @@ fn test_requirement_2_window_title() {
     assert_eq!(DOWNLOAD_FILE_INFO_TITLE, "Download File Info");
     let builder = egui::ViewportBuilder::default()
         .with_title(DOWNLOAD_FILE_INFO_TITLE)
-        .with_inner_size([560.0, 380.0])
-        .with_min_inner_size([560.0, 380.0])
-        .with_max_inner_size([560.0, 380.0])
+        .with_inner_size([560.0, 350.0])
+        .with_min_inner_size([560.0, 350.0])
+        .with_max_inner_size([560.0, 350.0])
         .with_resizable(false)
         .with_maximize_button(false)
         .with_minimize_button(false)
         .with_close_button(true);
     assert_eq!(builder.title, Some("Download File Info".to_string()));
     assert_eq!(builder.resizable, Some(false));
-    assert_eq!(builder.inner_size, Some(Vec2::new(560.0, 380.0)));
-    assert_eq!(builder.min_inner_size, Some(Vec2::new(560.0, 380.0)));
-    assert_eq!(builder.max_inner_size, Some(Vec2::new(560.0, 380.0)));
+    assert_eq!(builder.inner_size, Some(Vec2::new(560.0, 350.0)));
+    assert_eq!(builder.min_inner_size, Some(Vec2::new(560.0, 350.0)));
+    assert_eq!(builder.max_inner_size, Some(Vec2::new(560.0, 350.0)));
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn test_requirement_1_and_3_window_size_scaling_and_footer() {
         theme::configure_visuals(&ctx, true);
         let pal = theme::palette(true);
 
-        let window_size = Vec2::new(560.0, 380.0);
+        let window_size = Vec2::new(560.0, 350.0);
 
         let _ = ctx.run(Default::default(), |ctx| {
             let mut url = "https://example.com/test.zip".to_string();
@@ -59,6 +59,8 @@ fn test_requirement_1_and_3_window_size_scaling_and_footer() {
                 open_settings: false,
                 url_changed: false,
                 category_changed: false,
+                retry_info: false,
+                use_link_as_is: false,
             };
 
             let mut dlg_state = AddDialogState {
@@ -73,6 +75,8 @@ fn test_requirement_1_and_3_window_size_scaling_and_footer() {
                 description: &mut desc,
                 file_size: Some(1024 * 1024),
                 is_probing: false,
+                is_reading_info: false,
+                info_error: None,
                 error_message: None,
                 show_notes_expanded: &mut show_notes,
                 show_advanced_expanded: &mut show_adv,
@@ -120,9 +124,9 @@ fn test_requirement_1_and_3_window_size_scaling_and_footer() {
             // Verify body and footer do not overlap
             assert!(footer_response.response.rect.top() >= body_response.response.rect.bottom());
 
-            // Verify total content fits within 560 x 380 DIP window without clipping
+            // Verify total content fits within 560 x 350 DIP window without clipping
             assert!(window_size.x >= 560.0);
-            assert!(window_size.y >= 380.0);
+            assert!(window_size.y >= 350.0);
         });
     }
 }

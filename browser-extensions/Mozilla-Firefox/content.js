@@ -7,7 +7,20 @@
  * Strictly suppresses buttons on hover mini-previews, thumbnails, and inactive players.
  */
 
+(() => {
 "use strict";
+
+// Guard against multiple injections in SPA navigations, iframes, or re-executions
+if (typeof window !== "undefined") {
+  if (window.__cosmoLoaded) {
+    return;
+  }
+  window.__cosmoLoaded = true;
+  // Strictly prevent injecting inside YouTube subframes/ad-iframes
+  if (window !== window.top && (window.location.hostname.includes("youtube.com") || window.location.hostname.includes("youtu.be"))) {
+    return;
+  }
+}
 
 const runtime = typeof browser !== "undefined" ? browser : (typeof chrome !== "undefined" ? chrome : null);
 
@@ -17,7 +30,8 @@ const QUALITIES = [
   { label: "480p", meta: "41 MB", format: "480p", audioOnly: false },
   { label: "360p", meta: "24 MB", format: "360p", audioOnly: false },
   { divider: true },
-  { label: "Audio only", meta: "9 MB", format: "audio", audioOnly: true }
+  { label: "Audio only", meta: "9 MB", format: "audio", audioOnly: true },
+  { label: "Best available", meta: "Auto", format: "best", audioOnly: false }
 ];
 
 let siteExcluded = false;
@@ -166,7 +180,7 @@ function attachCosmoDownloadButton(videoEl) {
   if (!hostContainer) return;
 
   // Prevent duplicate injections inside same host container or on same video
-  if (hostContainer.querySelector(".cosmo-video-container")) {
+  if (hostContainer.querySelector(".cosmo-video-container") || activeAttachedButtons.has(videoEl)) {
     return;
   }
 
@@ -187,6 +201,8 @@ function attachCosmoDownloadButton(videoEl) {
   btn.className = "cosmo-video-download-btn";
   btn.type = "button";
   btn.setAttribute("aria-label", "Download Video");
+  btn.setAttribute("aria-haspopup", "true");
+  btn.setAttribute("aria-expanded", "false");
 
   const logoImg = document.createElement("img");
   logoImg.className = "cosmo-btn-logo";
@@ -270,12 +286,36 @@ function attachCosmoDownloadButton(videoEl) {
     });
   });
 
+  const openMenu = () => {
+    container.classList.add("open");
+    btn.setAttribute("aria-expanded", "true");
+    try {
+      const rect = btn.getBoundingClientRect();
+      const menuHeight = 220;
+      if (rect.bottom + menuHeight > (window.innerHeight || document.documentElement.clientHeight || 900)) {
+        container.classList.add("flip-up");
+      } else {
+        container.classList.remove("flip-up");
+      }
+    } catch (_) {}
+  };
+
+  const closeMenu = () => {
+    container.classList.remove("open");
+    container.classList.remove("flip-up");
+    btn.setAttribute("aria-expanded", "false");
+  };
+
   // Toggle dropdown on button click
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
-    container.classList.toggle("open");
+    if (container.classList.contains("open")) {
+      closeMenu();
+    } else {
+      openMenu();
+    }
   });
 
   // Handle Quality Selection
@@ -291,10 +331,10 @@ function attachCosmoDownloadButton(videoEl) {
       // Feedback animation
       const textEl = btn.querySelector(".cosmo-btn-text");
       const prevText = textEl ? textEl.textContent : "Download";
-      if (textEl) textEl.textContent = "Sent";
+      if (textEl) textEl.textContent = "Sent to CosmoDownloader";
       btn.classList.add("sent");
 
-      container.classList.remove("open");
+      closeMenu();
 
       setTimeout(() => {
         if (textEl) textEl.textContent = prevText;
@@ -302,6 +342,16 @@ function attachCosmoDownloadButton(videoEl) {
       }, 2000);
     });
   });
+
+  // Close menu on Escape key
+  const onKeyDown = (e) => {
+    if (e.key === "Escape" && container.classList.contains("open")) {
+      e.preventDefault();
+      closeMenu();
+      btn.focus();
+    }
+  };
+  document.addEventListener("keydown", onKeyDown);
 
   // Keep button solidly visible during user interaction
   const showBtn = (e) => {
@@ -331,7 +381,7 @@ function attachCosmoDownloadButton(videoEl) {
     if (!container.classList.contains("open")) return;
     const path = typeof e.composedPath === "function" ? e.composedPath() : [];
     if (!container.contains(e.target) && !path.includes(container)) {
-      container.classList.remove("open");
+      closeMenu();
     }
   };
   document.addEventListener("pointerdown", onPointerDownOutside);
@@ -345,6 +395,7 @@ function attachCosmoDownloadButton(videoEl) {
     hostContainer,
     cleanup: () => {
       document.removeEventListener("pointerdown", onPointerDownOutside);
+      document.removeEventListener("keydown", onKeyDown);
       hostContainer.removeEventListener("mouseenter", showBtn);
       hostContainer.removeEventListener("mousemove", showBtn);
       hostContainer.removeEventListener("mouseleave", handleMouseLeave);
@@ -353,41 +404,126 @@ function attachCosmoDownloadButton(videoEl) {
   });
 }
 
+function cleanTitleFallback(raw) {
+  if (!raw) return "";
+  let clean = String(raw).trim();
+  // Remove leading notification counter e.g. "(19) "
+  clean = clean.replace(/^\(\d+\)\s*/, "");
+  // Remove trailing " - YouTube" or " | YouTube"
+  clean = clean.replace(/\s*[-|]\s*YouTube$/i, "");
+  return clean.trim();
+}
+
+function extractVideoTitle() {
+  // 1. Try window.ytInitialPlayerResponse.videoDetails.title
+  try {
+    if (window.ytInitialPlayerResponse?.videoDetails?.title) {
+      const t = cleanTitleFallback(window.ytInitialPlayerResponse.videoDetails.title);
+      if (t) return t;
+    }
+  } catch (_) {}
+
+  // 1b. Try parsing from script tags containing ytInitialPlayerResponse
+  try {
+    const scripts = document.querySelectorAll("script");
+    for (const s of scripts) {
+      const text = s.textContent || "";
+      if (text.includes("ytInitialPlayerResponse")) {
+        const match = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
+        if (match && match[1]) {
+          try {
+            const data = JSON.parse(match[1]);
+            if (data?.videoDetails?.title) {
+              const t = cleanTitleFallback(data.videoDetails.title);
+              if (t) return t;
+            }
+          } catch (_) {}
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 2. Try meta[property="og:title"]
+  try {
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
+    if (ogTitle) {
+      const t = cleanTitleFallback(ogTitle);
+      if (t) return t;
+    }
+  } catch (_) {}
+
+  // 3. Try oEmbed title
+  try {
+    const oembedLink = document.querySelector('link[type="application/json+oembed"]')?.getAttribute("title");
+    if (oembedLink) {
+      const t = cleanTitleFallback(oembedLink);
+      if (t) return t;
+    }
+  } catch (_) {}
+
+  // 4. Fallback to document.title cleaned
+  const fallback = cleanTitleFallback(document.title);
+  return fallback || "video";
+}
+
 function sanitizeFilename(name) {
-  const map = {
-    '<': '＜',
-    '>': '＞',
-    ':': '：',
-    '"': '＂',
-    '/': '⧸',
-    '\\': '⧹',
-    '|': '｜',
-    '?': '？',
-    '*': '＊'
-  };
+  let clean = cleanTitleFallback(name);
   let res = '';
   let prevSpace = false;
-  for (const c of name) {
-    if (c.charCodeAt(0) < 32) {
+
+  for (const c of clean) {
+    const code = c.codePointAt(0);
+
+    // Never write U+FFFD () into the filename
+    if (code === 0xFFFD) {
+      continue;
+    }
+
+    // Keep emoji joiners/selectors
+    const isEmojiModifier = code === 0x200D || code === 0xFE0F;
+
+    // Drop invisible & bidi control characters
+    if (!isEmojiModifier && (
+      code === 0x200B || code === 0x200C || code === 0x200E || code === 0x200F
+      || (code >= 0x202A && code <= 0x202E)
+      || (code >= 0x2060 && code <= 0x2064)
+      || code === 0xFEFF || code === 0x00AD || code === 0x180E
+    )) {
+      continue;
+    }
+
+    // Replace non-standard spaces with normal space
+    const isNonstandardSpace = code === 0x00A0
+      || (code >= 0x2000 && code <= 0x200A)
+      || code === 0x202F || code === 0x205F || code === 0x3000;
+
+    if (isNonstandardSpace || /\s/.test(c)) {
       if (!prevSpace) {
         res += ' ';
         prevSpace = true;
       }
       continue;
     }
-    if (map[c]) {
-      res += map[c];
-      prevSpace = false;
-    } else if (/\s/.test(c)) {
+
+    // Drop ASCII control chars without inserting space
+    if (code < 32 && !isEmojiModifier) {
+      continue;
+    }
+
+    // Strip characters forbidden by Windows: < > : " / \ | ? *
+    // Replace with space so adjacent words do not concatenate, collapsing any double spaces.
+    if (/[<>:"/\\|?*]/.test(c)) {
       if (!prevSpace) {
         res += ' ';
         prevSpace = true;
       }
-    } else {
-      res += c;
-      prevSpace = false;
+      continue;
     }
+
+    res += c;
+    prevSpace = false;
   }
+
   res = res.trim().replace(/\.+$/, '').trim();
   if (!res) return 'download.bin';
 
@@ -412,6 +548,8 @@ function normalizeStreamingUrl(rawUrl) {
   return rawUrl.trim();
 }
 
+let lastDownloadTriggered = { url: "", timestamp: 0 };
+
 function triggerDownload(videoEl, format) {
   let videoUrl = videoEl.src || videoEl.currentSrc || "";
   if (!videoUrl) {
@@ -423,7 +561,15 @@ function triggerDownload(videoEl, format) {
   const pageUrl = normalizeStreamingUrl(rawPageUrl);
   const isStreaming = pageUrl.includes("youtube.com") || pageUrl.includes("youtu.be") || pageUrl.includes("vimeo.com");
   const urlToSend = (isStreaming || !videoUrl || videoUrl.startsWith("blob:")) ? pageUrl : videoUrl;
-  const pageTitle = document.title ? document.title.replace(" - YouTube", "").trim() : "video";
+
+  const now = Date.now();
+  if (lastDownloadTriggered.url === urlToSend && lastDownloadTriggered.format === format && (now - lastDownloadTriggered.timestamp) < 2000) {
+    console.log("[CosmoDownloader] Suppressing duplicate video button trigger within 2s for:", urlToSend);
+    return;
+  }
+  lastDownloadTriggered = { url: urlToSend, format: format, timestamp: now };
+
+  const pageTitle = extractVideoTitle();
   const ext = format === "audio" ? ".mp3" : ".mp4";
   const safeFilename = sanitizeFilename(pageTitle) + ext;
 
@@ -516,3 +662,4 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { isMiniPreview, isYouTubeHost, getHostContainer };
 }
+})();

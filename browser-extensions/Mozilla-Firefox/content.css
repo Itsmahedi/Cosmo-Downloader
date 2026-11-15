@@ -98,9 +98,13 @@
 }
 
 .cosmo-video-container.open .cosmo-quality-menu {
-  display: flex !important;
-  flex-direction: column !important;
+  display: block !important;
   animation: cosmo-fade-in 160ms ease-out forwards !important;
+}
+
+.cosmo-video-container.flip-up .cosmo-quality-menu {
+  top: auto !important;
+  bottom: calc(100% + 6px) !important;
 }
 
 @keyframes cosmo-fade-in {

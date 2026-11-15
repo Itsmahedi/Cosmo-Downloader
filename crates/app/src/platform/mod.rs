@@ -17,8 +17,10 @@ pub fn log_daemon(msg: &str) {
         .unwrap_or_else(|| std::env::temp_dir().join("CosmoDownloader_logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file = log_dir.join("cosmodownloader.log");
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    let line = format!("[{}] {}\n", timestamp, msg);
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let thread_id = std::thread::current().id();
+    let line = format!("[{}][{:?}] {}\n", timestamp, thread_id, msg);
+    eprint!("{}", line);
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

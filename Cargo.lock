@@ -3288,7 +3288,6 @@ dependencies = [
 name = "rustget-app"
 version = "1.2.5"
 dependencies = [
- "anyhow",
  "chrono",
  "eframe",
  "egui",
@@ -3305,6 +3304,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "url",
+ "uuid",
 ]
 
 [[package]]

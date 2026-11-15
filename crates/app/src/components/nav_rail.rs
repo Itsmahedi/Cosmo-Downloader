@@ -36,60 +36,61 @@ pub fn render_category_sidebar(
     selected_category: &mut CategoryFilter,
     cat_counts: &CategoryCounts,
 ) {
-    // 1. Status Section
-    ui.painter().text(
-        pos2(ui.min_rect().left() + 8.0, ui.cursor().top() + 4.0),
-        egui::Align2::LEFT_TOP,
-        "Status",
-        egui::FontId::proportional(12.0),
-        pal.muted,
-    );
-    ui.add_space(24.0);
+    egui::ScrollArea::vertical()
+        .id_salt("sidebar_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // 1. Status Section
+            ui.label(
+                egui::RichText::new("Status")
+                    .size(12.0)
+                    .color(pal.muted),
+            );
+            ui.add_space(8.0);
 
-    type NavStatusItem = (StatusFilter, &'static str, usize, fn(&Painter, Rect, Color32));
-    let status_items: [NavStatusItem; 4] = [
-        (StatusFilter::All, "All Downloads", status_counts.all, icons::draw_all),
-        (StatusFilter::Downloading, "Downloading", status_counts.downloading, icons::draw_download),
-        (StatusFilter::Completed, "Completed", status_counts.completed, icons::draw_check),
-        (StatusFilter::Paused, "Paused", status_counts.paused, icons::draw_pause),
-    ];
+            type NavStatusItem = (StatusFilter, &'static str, usize, fn(&Painter, Rect, Color32));
+            let status_items: [NavStatusItem; 4] = [
+                (StatusFilter::All, "All Downloads", status_counts.all, icons::draw_all),
+                (StatusFilter::Downloading, "Downloading", status_counts.downloading, icons::draw_download),
+                (StatusFilter::Completed, "Completed", status_counts.completed, icons::draw_check),
+                (StatusFilter::Paused, "Paused", status_counts.paused, icons::draw_pause),
+            ];
 
-    for (st, label, count, icon_fn) in status_items {
-        if render_nav_item(ui, pal, *selected_status == st, label, count, icon_fn) {
-            *selected_status = st;
-        }
-        ui.add_space(2.0);
-    }
+            for (st, label, count, icon_fn) in status_items {
+                if render_nav_item(ui, pal, *selected_status == st, label, count, icon_fn) {
+                    *selected_status = st;
+                }
+                ui.add_space(2.0);
+            }
 
-    ui.add_space(16.0);
+            ui.add_space(16.0);
 
-    // 2. Categories Section
-    ui.painter().text(
-        pos2(ui.min_rect().left() + 8.0, ui.cursor().top() + 4.0),
-        egui::Align2::LEFT_TOP,
-        "Categories",
-        egui::FontId::proportional(12.0),
-        pal.muted,
-    );
-    ui.add_space(24.0);
+            // 2. Categories Section
+            ui.label(
+                egui::RichText::new("Categories")
+                    .size(12.0)
+                    .color(pal.muted),
+            );
+            ui.add_space(8.0);
 
-    type NavCategoryItem = (CategoryFilter, &'static str, usize, fn(&Painter, Rect, Color32));
-    let cat_items: [NavCategoryItem; 7] = [
-        (CategoryFilter::All, "All Categories", cat_counts.all, icons::draw_all),
-        (CategoryFilter::Video, "Video", cat_counts.video, icons::draw_video),
-        (CategoryFilter::Music, "Music", cat_counts.music, icons::draw_music),
-        (CategoryFilter::Documents, "Documents", cat_counts.documents, icons::draw_documents),
-        (CategoryFilter::Compressed, "Compressed", cat_counts.compressed, icons::draw_compressed),
-        (CategoryFilter::Programs, "Programs", cat_counts.programs, icons::draw_programs),
-        (CategoryFilter::Other, "Other", cat_counts.other, icons::draw_other),
-    ];
+            type NavCategoryItem = (CategoryFilter, &'static str, usize, fn(&Painter, Rect, Color32));
+            let cat_items: [NavCategoryItem; 7] = [
+                (CategoryFilter::All, "All Categories", cat_counts.all, icons::draw_all),
+                (CategoryFilter::Video, "Video", cat_counts.video, icons::draw_video),
+                (CategoryFilter::Music, "Music", cat_counts.music, icons::draw_music),
+                (CategoryFilter::Documents, "Documents", cat_counts.documents, icons::draw_documents),
+                (CategoryFilter::Compressed, "Compressed", cat_counts.compressed, icons::draw_compressed),
+                (CategoryFilter::Programs, "Programs", cat_counts.programs, icons::draw_programs),
+                (CategoryFilter::Other, "Other", cat_counts.other, icons::draw_other),
+            ];
 
-    for (cat, label, count, icon_fn) in cat_items {
-        if render_nav_item(ui, pal, *selected_category == cat, label, count, icon_fn) {
-            *selected_category = cat;
-        }
-        ui.add_space(2.0);
-    }
+            for (cat, label, count, icon_fn) in cat_items {
+                if render_nav_item(ui, pal, *selected_category == cat, label, count, icon_fn) {
+                    *selected_category = cat;
+                }
+                ui.add_space(2.0);
+            }
+        });
 }
 
 pub fn render_nav_item(

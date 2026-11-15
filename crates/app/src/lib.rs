@@ -11,6 +11,7 @@ use eframe::egui;
 
 pub use app::{CosmoDownloaderApp, APP_TITLE, DOWNLOAD_FILE_INFO_TITLE, ICON_RGBA};
 
+#[cfg(windows)]
 fn send_http_to_bridge(req: &str) -> bool {
     for _ in 0..10 {
         if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:42424") {
@@ -61,9 +62,27 @@ pub fn run() -> eframe::Result<()> {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let _guard = rt.enter();
 
-    // Parse optional CLI URL or --popup-file argument
+    // Identify whether this launch is for a popup/dialog
+    let is_popup_arg = std::env::args().skip(1).any(|a| {
+        let clean = a.trim_matches('"').trim_matches('\'');
+        clean == "--popup"
+            || clean == "--popup-file"
+            || clean.starts_with("--popup-file=")
+            || clean == "--add-url"
+            || clean.starts_with("--add-url=")
+            || clean.starts_with("cosmodownloader://")
+            || clean.starts_with("rustget://")
+            || clean.starts_with("http://")
+            || clean.starts_with("https://")
+            || clean.starts_with("--view=")
+    });
+
+    // Parse optional CLI URL or --popup-file argument (Windows single-instance handover)
+    #[cfg(windows)]
     let mut cli_popup_file: Option<String> = None;
+    #[cfg(windows)]
     let mut cli_url: Option<String> = None;
+    #[cfg(windows)]
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -72,6 +91,14 @@ pub fn run() -> eframe::Result<()> {
                 cli_popup_file = args.next().map(|s| s.trim_matches('"').trim_matches('\'').to_string());
             } else if clean.starts_with("--popup-file=") {
                 cli_popup_file = Some(clean.trim_start_matches("--popup-file=").trim_matches('"').trim_matches('\'').to_string());
+            } else if clean == "--add-url" {
+                cli_url = args.next().map(|s| s.trim_matches('"').trim_matches('\'').to_string());
+            } else if clean.starts_with("--add-url=") {
+                cli_url = Some(clean.trim_start_matches("--add-url=").trim_matches('"').trim_matches('\'').to_string());
+            } else if clean.starts_with("cosmodownloader://") {
+                cli_url = Some(clean.trim_start_matches("cosmodownloader://").to_string());
+            } else if clean.starts_with("rustget://") {
+                cli_url = Some(clean.trim_start_matches("rustget://").to_string());
             } else if clean.starts_with("http://") || clean.starts_with("https://") {
                 cli_url = Some(clean.to_string());
             }
@@ -81,7 +108,7 @@ pub fn run() -> eframe::Result<()> {
     // Single-instance guard
     let is_screenshot_mode = std::env::args().any(|a| {
         let clean = a.trim_matches('"').trim_matches('\'');
-        clean.starts_with("--screenshot")
+        clean.starts_with("--screenshot") || clean.starts_with("--view")
     });
     #[cfg(windows)]
     let _instance_mutex_guard: *mut std::ffi::c_void;
@@ -118,6 +145,9 @@ pub fn run() -> eframe::Result<()> {
                 if send_http_to_bridge(&req) {
                     std::process::exit(0);
                 }
+            } else if is_popup_arg {
+                // If this second instance was invoked in popup/dialog mode, NEVER open the main dashboard!
+                std::process::exit(0);
             } else {
                 let is_bg = std::env::args().any(|a| a == "--minimized" || a == "--daemon");
                 if !is_bg {
@@ -139,14 +169,16 @@ pub fn run() -> eframe::Result<()> {
 
     #[cfg(not(windows))]
     let _unix_instance_guard = {
-        if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:42424") {
-            let token = rustget_core::server::get_or_create_bridge_token();
-            let show_req = format!(
-                "POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Cosmo-Token: {}\r\nConnection: close\r\n\r\n",
-                token
-            );
-            let _ = std::io::Write::write_all(&mut stream, show_req.as_bytes());
-            std::process::exit(0);
+        if !is_screenshot_mode {
+            if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:42424") {
+                let token = rustget_core::server::get_or_create_bridge_token();
+                let show_req = format!(
+                    "POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Cosmo-Token: {}\r\nConnection: close\r\n\r\n",
+                    token
+                );
+                let _ = std::io::Write::write_all(&mut stream, show_req.as_bytes());
+                std::process::exit(0);
+            }
         }
     };
 
@@ -156,10 +188,6 @@ pub fn run() -> eframe::Result<()> {
         height: 32,
     };
 
-    let is_popup_arg = std::env::args().any(|a| {
-        let clean = a.trim_matches('"');
-        clean == "--popup" || clean == "--popup-file" || clean.starts_with("--popup-file=")
-    });
     let start_minimized = std::env::args().any(|a| a == "--minimized" || a == "--daemon");
 
     let custom_scale: Option<f32> = std::env::args().find_map(|a| {
@@ -171,18 +199,38 @@ pub fn run() -> eframe::Result<()> {
         }
     });
 
+    let custom_size: Option<(f32, f32)> = std::env::args().find_map(|a| {
+        let clean = a.trim_matches('"').trim_matches('\'');
+        if clean.starts_with("--size=") {
+            let part = clean.trim_start_matches("--size=");
+            let mut parts = part.split('x');
+            let w = parts.next()?.parse().ok()?;
+            let h = parts.next()?.parse().ok()?;
+            Some((w, h))
+        } else {
+            None
+        }
+    });
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_icon(Arc::new(window_icon));
 
     if is_popup_arg {
-        let (w, h) = if let Some(s) = custom_scale {
+        let (w, h) = if std::env::args().any(|a| {
+            let clean = a.trim_matches('"').trim_matches('\'');
+            clean == "--view=cascade" || clean == "--view=cascade_canvas"
+        }) {
+            (640.0, 430.0)
+        } else if let Some(s) = custom_scale {
             (560.0 * s, 350.0 * s)
         } else {
             (560.0, 350.0)
         };
+        let (pos_x, pos_y) = platform::get_dialog_center_pos(false, w, h);
         viewport = viewport
             .with_app_id("cosmo-dialog")
             .with_title(DOWNLOAD_FILE_INFO_TITLE)
+            .with_position([pos_x, pos_y])
             .with_inner_size([w, h])
             .with_min_inner_size([w, h])
             .with_max_inner_size([w, h])
@@ -200,17 +248,18 @@ pub fn run() -> eframe::Result<()> {
             .with_title(APP_TITLE)
             .with_decorations(false)
             .with_inner_size([1000.0, 640.0])
-            .with_min_inner_size([640.0, 620.0])
+            .with_min_inner_size([760.0, 480.0])
             .with_resizable(true)
             .with_visible(false)
             .with_active(false);
     } else {
+        let (win_w, win_h) = custom_size.unwrap_or((1000.0, 640.0));
         viewport = viewport
             .with_app_id("cosmo-downloader")
             .with_title(APP_TITLE)
             .with_decorations(false)
-            .with_inner_size([1000.0, 640.0])
-            .with_min_inner_size([640.0, 620.0])
+            .with_inner_size([win_w, win_h])
+            .with_min_inner_size([760.0, 480.0])
             .with_resizable(true)
             .with_visible(true)
             .with_active(true);

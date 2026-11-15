@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
+    "test:rickroll": "node scripts/rickroll-test.mjs",
     "lint:css": "stylelint browser-extensions/**/*.css",
     "sync-extensions": "node scripts/sync-extensions.mjs"
   },

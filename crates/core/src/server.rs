@@ -38,6 +38,9 @@ pub fn spawn_on_demand_popup(dl_req: &ExtensionDownloadRequest) -> bool {
             if let Ok(json) = serde_json::to_string(dl_req) {
                 if std::fs::write(&temp_file, json).is_ok() {
                     let mut cmd = std::process::Command::new(&exe);
+                    cmd.stdin(std::process::Stdio::null());
+                    cmd.stdout(std::process::Stdio::null());
+                    cmd.stderr(std::process::Stdio::null());
                     cmd.arg("--popup-file").arg(&temp_file);
                     if cmd.spawn().is_ok() {
                         return true;
@@ -68,13 +71,15 @@ pub fn get_or_create_bridge_token() -> String {
 /// or native requests with no `Origin` (and non-`cross-site` `Sec-Fetch-Site`) are allowed.
 fn validate_request_origin(headers_part: &str) -> Result<Option<String>, &'static str> {
     let mut origin_val: Option<String> = None;
+    let mut is_cross_site = false;
+
     for line in headers_part.lines() {
         let lower = line.to_ascii_lowercase();
         if lower.starts_with("sec-fetch-site:") {
             if let Some(pos) = line.find(':') {
                 let sfs = line[pos + 1..].trim().to_ascii_lowercase();
                 if sfs == "cross-site" {
-                    return Err("Forbidden: cross-site browser requests are rejected");
+                    is_cross_site = true;
                 }
             }
         }
@@ -98,6 +103,11 @@ fn validate_request_origin(headers_part: &str) -> Result<Option<String>, &'stati
             }
         }
     }
+
+    if is_cross_site && origin_val.is_none() {
+        return Err("Forbidden: cross-site browser requests are rejected");
+    }
+
     Ok(origin_val)
 }
 
@@ -210,16 +220,23 @@ impl BridgeServer {
 
     /// Run the server until cancellation token is triggered.
     pub async fn run(self, cancel: CancellationToken) {
-        let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
-        let listener = match TcpListener::bind(addr).await {
+        let addr_all = SocketAddr::from(([0, 0, 0, 0], self.port));
+        let addr_local = SocketAddr::from(([127, 0, 0, 1], self.port));
+        let listener = match TcpListener::bind(addr_all).await {
             Ok(l) => {
-                info!("Cosmo Downloader local browser bridge listening on http://{}", addr);
+                info!("Cosmo Downloader local browser bridge listening on http://{}", addr_all);
                 l
             }
-            Err(e) => {
-                warn!("Failed to bind browser bridge on port {}: {}", self.port, e);
-                return;
-            }
+            Err(_) => match TcpListener::bind(addr_local).await {
+                Ok(l) => {
+                    info!("Cosmo Downloader local browser bridge listening on http://{}", addr_local);
+                    l
+                }
+                Err(e) => {
+                    warn!("Failed to bind browser bridge on port {}: {}", self.port, e);
+                    return;
+                }
+            },
         };
 
         let prompt_tx = self.prompt_tx.map(Arc::new);
@@ -341,6 +358,9 @@ impl BridgeServer {
 
                             match serde_json::from_str::<ExtensionDownloadRequest>(body) {
                                 Ok(mut dl_req) => {
+                                    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+                                    let thread_id = std::thread::current().id();
+                                    eprintln!("[{}][{:?}] STEP: extension request received via HTTP /download: url='{}'", timestamp, thread_id, dl_req.url);
                                     if let Err(e) = crate::probe::validate_http_url(&dl_req.url) {
                                         let err_json = serde_json::json!({
                                             "success": false,
@@ -455,12 +475,19 @@ impl BridgeServer {
                         } else if req.starts_with("GET /health") {
                             // Health endpoint: returns only {"status":"ok"} without leaking any sensitive data
                             let json_resp = "{\"status\":\"ok\"}";
+                            let origin_hdr = if cors_header.is_empty() {
+                                "Access-Control-Allow-Origin: *\r\n".to_string()
+                            } else {
+                                cors_header.clone()
+                            };
                             let resp = format!(
                                 "HTTP/1.1 200 OK\r\n\
-                                 {}Content-Type: application/json\r\n\
+                                 {}Access-Control-Allow-Private-Network: true\r\n\
+                                 Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                                 Content-Type: application/json\r\n\
                                  Content-Length: {}\r\n\
                                  Connection: close\r\n\r\n{}",
-                                cors_header,
+                                origin_hdr,
                                 json_resp.len(),
                                 json_resp
                             );

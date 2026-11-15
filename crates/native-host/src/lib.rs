@@ -7,6 +7,14 @@ use tracing::{error, info};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(windows)]
+extern "system" {
+    fn AllowSetForegroundWindow(dwProcessId: u32) -> i32;
+}
+
+#[cfg(windows)]
+const ASFW_ANY: u32 = 0xFFFFFFFF;
+
 use rustget_core::{
     db::Database,
     downloader::DownloadOptions,
@@ -192,13 +200,24 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                 }
             } else if let Some(exe_path) = find_app_exe() {
                 let mut cmd = Command::new(&exe_path);
+                cmd.stdin(std::process::Stdio::null());
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
                 #[cfg(windows)]
                 {
                     const DETACHED_PROCESS: u32 = 0x00000008;
                     const CREATE_NO_WINDOW: u32 = 0x08000000;
                     cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
                 }
-                match cmd.spawn() {
+                let spawn_res = cmd.spawn();
+                #[cfg(windows)]
+                if let Ok(ref child) = spawn_res {
+                    unsafe {
+                        AllowSetForegroundWindow(child.id());
+                        AllowSetForegroundWindow(ASFW_ANY);
+                    }
+                }
+                match spawn_res {
                     Ok(_) => HostResponse {
                         success: true,
                         app_running: Some(false),
@@ -247,7 +266,15 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
             };
 
             // First attempt: HTTP POST to local bridge server (if CosmoDownloader GUI or CLI queue is running)
+            #[cfg(windows)]
+            unsafe {
+                AllowSetForegroundWindow(ASFW_ANY);
+            }
             if let Ok(task_id) = forward_to_bridge_server(&url, &msg.filename, &msg.cookies, &msg.referer, &msg.user_agent, msg.num_segments).await {
+                #[cfg(windows)]
+                unsafe {
+                    AllowSetForegroundWindow(ASFW_ANY);
+                }
                 return HostResponse {
                     success: true,
                     app_running: Some(true),
@@ -277,6 +304,9 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                 });
                 if std::fs::write(&temp_file, payload.to_string()).is_ok() {
                     let mut popup_cmd = Command::new(&exe);
+                    popup_cmd.stdin(std::process::Stdio::null());
+                    popup_cmd.stdout(std::process::Stdio::null());
+                    popup_cmd.stderr(std::process::Stdio::null());
                     #[cfg(windows)]
                     {
                         const DETACHED_PROCESS: u32 = 0x00000008;
@@ -284,7 +314,14 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         popup_cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
                     }
                     popup_cmd.arg("--popup-file").arg(&temp_file);
-                    let _ = popup_cmd.spawn();
+                    let spawn_res = popup_cmd.spawn();
+                    #[cfg(windows)]
+                    if let Ok(ref child) = spawn_res {
+                        unsafe {
+                            AllowSetForegroundWindow(child.id());
+                            AllowSetForegroundWindow(ASFW_ANY);
+                        }
+                    }
 
                     return HostResponse {
                         success: true,

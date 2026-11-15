@@ -38,10 +38,13 @@ pub fn render_empty_state(
 
         if !subtitle.is_empty() {
             ui.add_space(shapes::S1);
-            ui.label(
-                egui::RichText::new(subtitle)
-                    .size(12.0)
-                    .color(pal.muted),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(subtitle)
+                        .size(12.0)
+                        .color(pal.muted),
+                )
+                .wrap()
             );
         }
 

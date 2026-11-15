@@ -10,6 +10,8 @@ fn test_unicode_filenames_on_disk() {
         "日本語のタイトル",
         "한국어 제목",
         "中文标题",
+        "Famous Alfaaz Video (Full) – Voice of Angels William Gamborg & Surtaal Music Academy ❤",
+        "Famous Alfaaz Video (Full) – Voice of Angels William Gamborg & Surtaal Music Academy ❤️",
     ];
 
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
@@ -40,4 +42,14 @@ fn test_unicode_filenames_on_disk() {
 
         fs::remove_file(&file_path).expect("Failed to remove file");
     }
+
+    // Step B: verify the exact test title from the prompt
+    let raw = "Famous Alfaaz Video (Full) – Voice of Angels | William Gamborg & Surtaal Music Academy ❤.mp4";
+    let expected = "Famous Alfaaz Video (Full) – Voice of Angels William Gamborg & Surtaal Music Academy ❤.mp4";
+    let actual = sanitize_filename(raw);
+    assert_eq!(actual, expected);
+    assert!(!actual.contains('\u{FFFD}'));
+    assert!(!actual.contains('?'));
+    assert!(actual.contains('–'));
+    assert!(actual.contains('❤'));
 }
