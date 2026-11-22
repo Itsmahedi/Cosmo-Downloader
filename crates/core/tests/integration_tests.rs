@@ -1,4 +1,4 @@
-﻿use std::net::SocketAddr;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -140,6 +140,7 @@ async fn test_multisegment_download_integration() {
         referer: None,
         cookie: None,
         expected_sha256: None,
+        custom_headers: None,
         resume: true,
     };
 
@@ -182,6 +183,7 @@ async fn test_single_stream_fallback() {
         referer: None,
         cookie: None,
         expected_sha256: None,
+        custom_headers: None,
         resume: false,
     };
 
@@ -221,6 +223,7 @@ async fn test_checksum_verification_integration() {
         referer: None,
         cookie: None,
         expected_sha256: Some(correct_sha256),
+        custom_headers: None,
         resume: false,
     };
 
@@ -243,6 +246,7 @@ async fn test_checksum_verification_integration() {
         referer: None,
         cookie: None,
         expected_sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+        custom_headers: None,
         resume: false,
     };
 

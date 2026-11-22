@@ -1,4 +1,4 @@
-﻿use thiserror::Error;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
@@ -34,6 +34,12 @@ pub enum DownloadError {
 
     #[error("Resume error: {0}")]
     ResumeError(String),
+
+    #[error("BitTorrent error: {0}")]
+    Torrent(String),
+
+    #[error("Internal engine error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, DownloadError>;

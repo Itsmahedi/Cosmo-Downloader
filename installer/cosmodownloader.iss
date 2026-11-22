@@ -2,8 +2,8 @@
 ; Cosmo Downloader Windows Setup
 
 #define MyAppName "Cosmo Downloader"
-#define MyAppVersion "1.2.5"
-#define MyAppShortVer "v1.2.5"
+#define MyAppVersion "1.2.6"
+#define MyAppShortVer "v1.2.6"
 #define MyAppPublisher "Mahedi"
 #define MyAppExeName "CosmoDownloader.exe"
 #define MyCliExeName "cosmodownloader-cli.exe"
@@ -17,7 +17,7 @@ AppVerName={#MyAppName} {#MyAppShortVer}
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\icon.ico
 AppPublisher={#MyAppPublisher}
-VersionInfoVersion=1.2.5.0
+VersionInfoVersion=1.2.6.0
 VersionInfoTextVersion={#MyAppVersion}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
@@ -35,6 +35,11 @@ RestartApplications=no
 UsePreviousAppDir=yes
 DisableDirPage=auto
 DisableProgramGroupPage=auto
+ChangesAssociations=yes
+#ifdef SIGN_UNINSTALLER
+SignTool=signtool $f
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -44,13 +49,20 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "startupicon"; Description: "Start Cosmo Downloader automatically with Windows"; GroupDescription: "Windows Integration:"
 Name: "registerbrowsers"; Description: "Register browser extension bridge (Chrome, Brave, Edge, Opera & Firefox)"; GroupDescription: "Browser Integration:"
 
+#ifndef BinDir
+  #if FileExists("..\target\x86_64-pc-windows-gnu\release\CosmoDownloader.exe")
+    #define BinDir "..\target\x86_64-pc-windows-gnu\release"
+  #else
+    #define BinDir "..\target\release"
+  #endif
+#endif
+
 [Files]
-Source: "..\target\release\CosmoDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\cosmodownloader-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\cosmodownloader-host.exe"; DestDir: "{app}"; DestName: "cosmodownloader-host.tmp"; Flags: ignoreversion
-Source: "..\target\release\rustget.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\rustget-host.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\libunwind.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BinDir}\CosmoDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\cosmodownloader-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\cosmodownloader-host.exe"; DestDir: "{app}"; DestName: "cosmodownloader-host.tmp"; Flags: ignoreversion
+Source: "{#BinDir}\rustget.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\rustget-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -65,10 +77,10 @@ Source: "..\browser-extensions\Chrome-Edge-Brave-Opera\*"; DestDir: "{app}\Brows
 Source: "..\browser-extensions\Mozilla-Firefox\*"; DestDir: "{app}\Browser-Extensions\Mozilla-Firefox"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"
-Name: "{group}\Cosmo Downloader CLI"; Filename: "{app}\{#MyCliExeName}"; IconFilename: "{app}\icon.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{group}\Cosmo Downloader CLI"; Filename: "{app}\{#MyCliExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
 ; Remove legacy duplicate Run value from earlier releases
@@ -82,6 +94,19 @@ Root: HKCU; Subkey: "Software\Chromium\NativeMessagingHosts\com.cosmodownloader.
 Root: HKCU; Subkey: "Software\Opera Software\Opera Stable\NativeMessagingHosts\com.cosmodownloader.downloader"; ValueType: string; ValueData: "{app}\com.cosmodownloader.downloader.chrome.json"; Tasks: registerbrowsers; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.cosmodownloader.downloader"; ValueType: string; ValueData: "{app}\com.cosmodownloader.downloader.edge.json"; Tasks: registerbrowsers; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\com.cosmodownloader.downloader"; ValueType: string; ValueData: "{app}\com.cosmodownloader.downloader.firefox.json"; Tasks: registerbrowsers; Flags: uninsdeletekey
+
+; File Association (.torrent)
+Root: HKCU; Subkey: "Software\Classes\.torrent"; ValueType: string; ValueName: ""; ValueData: "CosmoDownloader.Torrent"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.torrent\OpenWithProgids"; ValueType: none; ValueName: "CosmoDownloader.Torrent"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\CosmoDownloader.Torrent"; ValueType: string; ValueName: ""; ValueData: "BitTorrent File"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\CosmoDownloader.Torrent\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\CosmoDownloader.Torrent\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
+
+; Protocol Handler (magnet:)
+Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; ValueData: "URL:BitTorrent Magnet Link"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

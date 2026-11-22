@@ -35,6 +35,8 @@
   ],
   "host_permissions": [
     "<all_urls>",
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*",
     "http://127.0.0.1:42424/*"
   ],
   "background": {

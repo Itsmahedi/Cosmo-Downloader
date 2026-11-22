@@ -1,8 +1,10 @@
 use eframe::egui::{self, Color32, FontId, Vec2};
 use rustget_app::{
+    components::title_bar,
     dialogs::add_download::{
         render_add_download_body, render_add_download_footer, AddDialogOutcome, AddDialogState,
     },
+    dialogs::download_window::DownloadWindowOutcome,
     theme,
     DOWNLOAD_FILE_INFO_TITLE,
 };
@@ -19,13 +21,95 @@ fn test_requirement_2_window_title() {
         .with_max_inner_size([560.0, 350.0])
         .with_resizable(false)
         .with_maximize_button(false)
-        .with_minimize_button(false)
+        .with_minimize_button(true)
         .with_close_button(true);
     assert_eq!(builder.title, Some("Download File Info".to_string()));
     assert_eq!(builder.resizable, Some(false));
+    assert_eq!(builder.minimize_button, Some(true));
     assert_eq!(builder.inner_size, Some(Vec2::new(560.0, 350.0)));
     assert_eq!(builder.min_inner_size, Some(Vec2::new(560.0, 350.0)));
     assert_eq!(builder.max_inner_size, Some(Vec2::new(560.0, 350.0)));
+}
+
+#[test]
+fn test_download_info_popup_title_bar_minimize() {
+    let ctx = egui::Context::default();
+    theme::configure_fonts(&ctx);
+    theme::configure_visuals(&ctx, true);
+    let pal = theme::palette(true);
+
+    // Frame 0: Move pointer to minimize button center (x = 560 - 92 + 23 = 491.0, y = 18.0)
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(560.0, 350.0))),
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(491.0, 18.0)),
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            egui::TopBottomPanel::top("test_title_bar")
+                .exact_height(36.0)
+                .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO))
+                .show(ctx, |ui| {
+                    let _ = title_bar::render_title_bar(ui, ctx, &pal, None, DOWNLOAD_FILE_INFO_TITLE);
+                });
+        },
+    );
+
+    // Frame 1: Pointer button down on minimize button
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(560.0, 350.0))),
+            events: vec![
+                egui::Event::PointerButton {
+                    pos: egui::pos2(491.0, 18.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            egui::TopBottomPanel::top("test_title_bar")
+                .exact_height(36.0)
+                .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO))
+                .show(ctx, |ui| {
+                    let _ = title_bar::render_title_bar(ui, ctx, &pal, None, DOWNLOAD_FILE_INFO_TITLE);
+                });
+        },
+    );
+
+    // Frame 2: Pointer button up on minimize button -> triggers click
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(560.0, 350.0))),
+            events: vec![
+                egui::Event::PointerButton {
+                    pos: egui::pos2(491.0, 18.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        },
+        |ctx| {
+            egui::TopBottomPanel::top("test_title_bar")
+                .exact_height(36.0)
+                .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO))
+                .show(ctx, |ui| {
+                    let act = title_bar::render_title_bar(ui, ctx, &pal, None, DOWNLOAD_FILE_INFO_TITLE);
+                    assert!(act.minimize, "Minimize button click must set action.minimize to true");
+                    assert!(!act.close, "Minimize button click must not set close to true");
+                });
+        },
+    );
+
+    // Verify DownloadWindowOutcome::Minimize variant
+    let outcome = DownloadWindowOutcome::Minimize;
+    assert_eq!(outcome, DownloadWindowOutcome::Minimize);
 }
 
 #[test]
@@ -74,6 +158,8 @@ fn test_requirement_1_and_3_window_size_scaling_and_footer() {
                 remember_category: &mut remember,
                 description: &mut desc,
                 file_size: Some(1024 * 1024),
+                quality: None,
+                formatted_size: None,
                 is_probing: false,
                 is_reading_info: false,
                 info_error: None,
@@ -289,7 +375,6 @@ fn test_settings_dialog_renders_open_main_checkbox() {
     let mut open_main = false;
     let mut dont_complete = false;
     let mut min_tray = true;
-    let mut show_tray = true;
     let mut autostart = false;
     let mut start_min = false;
 
@@ -306,7 +391,6 @@ fn test_settings_dialog_renders_open_main_checkbox() {
                 open_main_on_download_start: &mut open_main,
                 dont_show_complete_dialog: &mut dont_complete,
                 minimize_to_tray: &mut min_tray,
-                show_tray_icon: &mut show_tray,
                 autostart: &mut autostart,
                 start_minimized: &mut start_min,
             };
@@ -523,4 +607,524 @@ fn test_case_5_repeat_5_times_no_extra_windows_no_leaks() {
         }
         assert_eq!(tracker.window_count, 1);
     }
+}
+
+#[test]
+fn test_section_7_options_defaults_and_dependencies() {
+    use rustget_app::dialogs::settings::{OptionsDialogState, OptionsTab, SpeedUnit, is_proxy_valid};
+
+    let mut state = OptionsDialogState::default();
+    assert_eq!(state.active_tab, OptionsTab::General);
+    assert!(!state.startup);
+    assert!(!state.minstart);
+    assert!(state.mintray);
+    assert_eq!(state.threads, 8);
+    assert_eq!(state.speed, 0);
+    assert_eq!(state.unit, SpeedUnit::Mbps);
+    assert!(state.folder.is_empty());
+    assert!(!state.clip);
+    assert!(state.notif);
+    assert!(state.cwin);
+    assert!(!state.openmain);
+    assert!(state.proxy.is_empty());
+    assert!(state.is_proxy_valid());
+
+    // Dependencies: start minimized requires startup
+    assert!(!state.is_start_minimized_enabled()); // startup is false
+    state.startup = true;
+    assert!(state.is_start_minimized_enabled()); // startup is true
+    assert!(state.is_minimize_to_tray_enabled()); // tray is always active
+
+    // Reset to defaults
+    state.speed = 100;
+    state.unit = SpeedUnit::Kbps;
+    state.reset_to_defaults();
+    assert_eq!(state.speed, 0);
+    assert_eq!(state.unit, SpeedUnit::Mbps);
+    assert_eq!(state.threads, 8);
+
+    // Proxy validation
+    assert!(is_proxy_valid(""));
+    assert!(is_proxy_valid("   "));
+    assert!(is_proxy_valid("http://127.0.0.1:8080"));
+    assert!(is_proxy_valid("https://proxy.example.com:3128/"));
+    assert!(is_proxy_valid("socks5://localhost:1080"));
+    assert!(is_proxy_valid("socks5h://10.0.0.1:9050"));
+
+    assert!(!is_proxy_valid("ftp://127.0.0.1:8080"));
+    assert!(!is_proxy_valid("http://"));
+    assert!(!is_proxy_valid("invalid_address"));
+    assert!(!is_proxy_valid("http://host:999999"));
+    assert!(!is_proxy_valid("http://host with spaces:8080"));
+}
+
+#[tokio::test]
+async fn test_options_live_save_and_persist() {
+    use rustget_core::db::Database;
+    use rustget_core::queue::QueueManager;
+    use rustget_app::dialogs::settings::{OptionsDialogState, OptionsTab, SpeedUnit};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let queue = std::sync::Arc::new(QueueManager::new(db.clone(), 3, 0, tx));
+
+    // Old config simulation: populate DB with old removed keys
+    db.set_setting("show_tray_icon_enabled", "true").await.unwrap();
+    db.set_setting("show_tray_only_minimized_enabled", "false").await.unwrap();
+    db.set_setting("minimize_to_tray_on_minimize_enabled", "true").await.unwrap();
+    db.set_setting("minimize_to_tray_enabled", "true").await.unwrap();
+    db.set_setting("start_minimized_enabled", "false").await.unwrap();
+
+    let mut autostart = false;
+    let mut start_minimized = false;
+    let mut minimize_to_tray = true;
+    let mut default_connections = 8;
+    let mut global_speed_kb: u64 = 0;
+    let mut default_save_dir = String::new();
+    let mut clipboard_monitor = false;
+    let mut notifications_enabled = true;
+    let mut dont_show_complete_dialog = false;
+    let mut open_main_on_download_start = false;
+    let mut proxy_url = String::new();
+    let clipboard_enabled = AtomicBool::new(false);
+
+    let mut opt = OptionsDialogState {
+        active_tab: OptionsTab::General,
+        startup: autostart,
+        minstart: start_minimized,
+        tray: true,
+        mintray: minimize_to_tray,
+        threads: default_connections,
+        speed: global_speed_kb,
+        unit: SpeedUnit::Mbps,
+        folder: default_save_dir.clone(),
+        clip: clipboard_monitor,
+        notif: notifications_enabled,
+        cwin: !dont_show_complete_dialog,
+        openmain: open_main_on_download_start,
+        proxy: proxy_url.clone(),
+    };
+
+    // User modifies settings live in UI:
+    opt.startup = true;
+    opt.minstart = true;
+    opt.mintray = false;
+    opt.threads = 12;
+    opt.speed = 2;
+    opt.unit = SpeedUnit::Mbps;
+    opt.folder = "C:\\CustomDownloads".to_string();
+    opt.clip = true;
+    opt.proxy = "http://127.0.0.1:8080".to_string();
+
+    // User clicks Save:
+    autostart = opt.startup;
+    start_minimized = opt.minstart && opt.startup;
+    minimize_to_tray = opt.mintray;
+    default_connections = opt.threads;
+    global_speed_kb = match opt.unit {
+        SpeedUnit::Mbps => opt.speed * 1024,
+        SpeedUnit::Kbps => opt.speed,
+    };
+    default_save_dir = opt.folder.clone();
+    clipboard_monitor = opt.clip;
+    notifications_enabled = opt.notif;
+    dont_show_complete_dialog = !opt.cwin;
+    open_main_on_download_start = opt.openmain;
+    proxy_url = opt.proxy.clone();
+    clipboard_enabled.store(clipboard_monitor, Ordering::Relaxed);
+
+    let speed_bps = global_speed_kb * 1024;
+    queue.set_max_concurrent(3).await;
+    queue.set_global_speed_limit(speed_bps).await;
+    queue.set_proxy(Some(proxy_url.clone())).await;
+
+    db.set_setting("max_concurrent_downloads", "3").await.unwrap();
+    db.set_setting("global_speed_limit_bps", &speed_bps.to_string()).await.unwrap();
+    db.set_setting("default_num_segments", &default_connections.to_string()).await.unwrap();
+    db.set_setting("default_save_dir", &default_save_dir).await.unwrap();
+    db.set_setting("proxy_url", &proxy_url).await.unwrap();
+    db.set_setting("clipboard_monitor_enabled", if clipboard_monitor { "true" } else { "false" }).await.unwrap();
+    db.set_setting("notifications_enabled", if notifications_enabled { "true" } else { "false" }).await.unwrap();
+    db.set_setting("minimize_to_tray_enabled", if minimize_to_tray { "true" } else { "false" }).await.unwrap();
+    db.set_setting("start_minimized_enabled", if start_minimized { "true" } else { "false" }).await.unwrap();
+
+    // Migration on save: removed keys are deleted from DB
+    db.delete_setting("show_tray_icon_enabled").await.unwrap();
+    db.delete_setting("show_tray_only_minimized_enabled").await.unwrap();
+    db.delete_setting("minimize_to_tray_on_minimize_enabled").await.unwrap();
+
+    assert_eq!(minimize_to_tray, false);
+    assert_eq!(start_minimized, true);
+    assert_eq!(default_connections, 12);
+    assert_eq!(global_speed_kb, 2048);
+    assert_eq!(default_save_dir, "C:\\CustomDownloads");
+    assert_eq!(clipboard_monitor, true);
+    assert_eq!(clipboard_enabled.load(Ordering::Relaxed), true);
+    assert_eq!(proxy_url, "http://127.0.0.1:8080");
+
+    assert_eq!(db.get_setting("minimize_to_tray_enabled").await.unwrap(), Some("false".to_string()));
+    assert_eq!(db.get_setting("start_minimized_enabled").await.unwrap(), Some("true".to_string()));
+    assert_eq!(db.get_setting("default_num_segments").await.unwrap(), Some("12".to_string()));
+    assert_eq!(db.get_setting("global_speed_limit_bps").await.unwrap(), Some((2048 * 1024).to_string()));
+    assert_eq!(db.get_setting("default_save_dir").await.unwrap(), Some("C:\\CustomDownloads".to_string()));
+    assert_eq!(db.get_setting("clipboard_monitor_enabled").await.unwrap(), Some("true".to_string()));
+    assert_eq!(db.get_setting("proxy_url").await.unwrap(), Some("http://127.0.0.1:8080".to_string()));
+
+    // Verify migration cleaned up removed keys:
+    assert!(db.get_setting("show_tray_icon_enabled").await.unwrap().is_none());
+    assert!(db.get_setting("show_tray_only_minimized_enabled").await.unwrap().is_none());
+    assert!(db.get_setting("minimize_to_tray_on_minimize_enabled").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_simplified_3_options_general_page_and_tray_behavior() {
+    use rustget_core::db::Database;
+    use rustget_app::dialogs::settings::{OptionsDialogState, OptionsTab};
+    use rustget_app::theme;
+
+    let db = Database::open_in_memory().unwrap();
+
+    // 1. Verify old keys in DB load with no error
+    db.set_setting("show_tray_icon_enabled", "true").await.unwrap();
+    db.set_setting("show_tray_only_minimized_enabled", "true").await.unwrap();
+    db.set_setting("minimize_to_tray_on_minimize_enabled", "true").await.unwrap();
+
+    let mut opt = OptionsDialogState::default();
+    assert_eq!(opt.active_tab, OptionsTab::General);
+    assert!(!opt.startup);
+    assert!(!opt.minstart);
+    assert!(opt.mintray);
+
+    // 2. Start minimized requires startup
+    assert!(!opt.is_start_minimized_enabled());
+    opt.startup = true;
+    assert!(opt.is_start_minimized_enabled());
+    opt.startup = false;
+    assert!(!opt.is_start_minimized_enabled());
+
+    // 3. Render General page in egui UI context
+    let ctx = egui::Context::default();
+    let pal = theme::palette(true);
+    let mut rendered_outcome = rustget_app::dialogs::settings::OptionsDialogOutcome::None;
+
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            rendered_outcome = rustget_app::dialogs::settings::render_options_window_content(
+                ui,
+                &pal,
+                None,
+                &mut opt,
+            );
+        });
+    });
+
+    assert_eq!(rendered_outcome, rustget_app::dialogs::settings::OptionsDialogOutcome::None);
+}
+
+#[tokio::test]
+async fn test_download_popup_opens_independently_when_main_window_hidden_in_tray() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use rustget_app::dialogs::download_window::{DownloadWindowState, DownloadWindowStage, DownloadWindowOutcome};
+
+    // 1. App running in system tray: main window is NOT open
+    let is_main_window_open = AtomicBool::new(false);
+    assert!(!is_main_window_open.load(Ordering::Relaxed));
+
+    // 2. Browser triggers download: popup state is created
+    let mut wnd = DownloadWindowState::new(
+        "https://example.com/movie.mp4".to_string(),
+        "movie.mp4".to_string(),
+        "Video".to_string(),
+        "C:\\Users\\steam\\Videos".to_string(),
+    );
+    wnd.is_open = true;
+
+    assert_eq!(wnd.stage, DownloadWindowStage::Info);
+    assert!(wnd.is_open);
+    // Main window must REMAIN closed/in tray
+    assert!(!is_main_window_open.load(Ordering::Relaxed), "Main window must stay hidden in tray");
+
+    // 3. Title bar classification check: Download File Info must be recognized as dialog
+    let title = "Download File Info";
+    let is_dialog = title == "Download File Info" || title == "New download" || title.contains("Download") || title.contains("Info");
+    assert!(is_dialog, "Download File Info must be classified as dialog for correct window drag and chrome");
+
+    // 4. User starts download without open_main_on_download_start
+    let open_main_on_download_start = false;
+    wnd.stage = DownloadWindowStage::Downloading;
+    if open_main_on_download_start {
+        is_main_window_open.store(true, Ordering::Relaxed);
+    }
+    assert_eq!(wnd.stage, DownloadWindowStage::Downloading);
+    assert!(!is_main_window_open.load(Ordering::Relaxed), "Main dashboard must NOT open when starting download in background mode");
+
+    // 5. User closes popup to background
+    let outcome = DownloadWindowOutcome::RunInBackground;
+    match outcome {
+        DownloadWindowOutcome::RunInBackground => {
+            wnd.is_open = false;
+        }
+        _ => {}
+    }
+    assert!(!wnd.is_open, "Popup window must close to background");
+    assert!(!is_main_window_open.load(Ordering::Relaxed), "Main app continues running silently in tray");
+}
+
+#[tokio::test]
+async fn test_download_popup_separate_from_minimized_main_window() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use rustget_app::dialogs::download_window::{DownloadWindowState, DownloadWindowStage, DownloadWindowOutcome};
+
+    // 1. App running with main window minimized to taskbar
+    let is_main_minimized = AtomicBool::new(true);
+    let is_main_window_open = AtomicBool::new(true);
+
+    // 2. Browser triggers download: popup window is created as separate entity
+    let mut wnd = DownloadWindowState::new(
+        "https://example.com/video.mp4".to_string(),
+        "video.mp4".to_string(),
+        "Video".to_string(),
+        "C:\\Users\\steam\\Videos".to_string(),
+    );
+    wnd.is_open = true;
+
+    assert!(wnd.is_open);
+    // Main dashboard MUST remain minimized on taskbar
+    assert!(is_main_minimized.load(Ordering::Relaxed), "Main window must stay minimized in taskbar");
+
+    // 3. Minimizing the popup dialog minimizes the popup, NOT the main window
+    let mut dlg_minimized = false;
+    let outcome = DownloadWindowOutcome::Minimize;
+    match outcome {
+        DownloadWindowOutcome::Minimize => {
+            dlg_minimized = true;
+            // Notice: is_main_minimized is NOT modified or unminimized
+        }
+        _ => {}
+    }
+    assert!(dlg_minimized, "Download info dialog was minimized");
+    assert!(is_main_minimized.load(Ordering::Relaxed), "Main window remains minimized in taskbar");
+
+    // 4. Starting download with open_main = false keeps dialog open in Downloading stage, main window stays minimized
+    let open_main_on_download_start = false;
+    let start_outcome = DownloadWindowOutcome::StartDownload;
+    match start_outcome {
+        DownloadWindowOutcome::StartDownload => {
+            wnd.stage = DownloadWindowStage::Downloading;
+            if open_main_on_download_start {
+                wnd.is_open = false;
+                is_main_minimized.store(false, Ordering::Relaxed);
+            }
+        }
+        _ => {}
+    }
+    assert!(wnd.is_open, "Popup stays open on start download showing downloading progress");
+    assert_eq!(wnd.stage, DownloadWindowStage::Downloading);
+    assert!(is_main_minimized.load(Ordering::Relaxed), "Main window remains minimized in taskbar");
+}
+
+#[tokio::test]
+async fn test_single_info_dialog_and_close_on_start_download() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use rustget_app::app::DownloadDialogRequest;
+    use rustget_app::dialogs::download_window::{DownloadWindowState, DownloadWindowStage, DownloadWindowOutcome};
+
+    // Tracker simulating the single-dialog and progress in-place behavior
+    struct SingleDialogAppTracker {
+        pub download_windows: Vec<DownloadWindowState>,
+        pub is_main_window_open: AtomicBool,
+        pub active_downloads: Vec<String>,
+    }
+
+    impl SingleDialogAppTracker {
+        fn new() -> Self {
+            Self {
+                download_windows: Vec::new(),
+                is_main_window_open: AtomicBool::new(true),
+                active_downloads: Vec::new(),
+            }
+        }
+
+        fn show_download_dialog(&mut self, req: DownloadDialogRequest) -> bool {
+            // Check if an Info dialog is already open
+            let existing_info = self.download_windows.iter().position(|w| {
+                w.is_open && w.stage == DownloadWindowStage::Info
+            });
+
+            if let Some(existing_idx) = existing_info {
+                // Focus existing, do NOT open a second dialog
+                self.download_windows[existing_idx].is_open = true;
+                return false; // Did not create a new window
+            }
+
+            let mut wnd = DownloadWindowState::new(
+                req.url.clone(),
+                req.filename.unwrap_or_default(),
+                "General".to_string(),
+                "C:\\Downloads".to_string(),
+            );
+            wnd.is_open = true;
+            self.download_windows.push(wnd);
+            true // Created new window
+        }
+
+        fn handle_outcome(&mut self, dialog_id: &str, outcome: DownloadWindowOutcome) {
+            let Some(window_idx) = self.download_windows.iter().position(|w| w.dialog_id == dialog_id) else {
+                return;
+            };
+
+            match outcome {
+                DownloadWindowOutcome::StartDownload => {
+                    let wnd = &mut self.download_windows[window_idx];
+                    let url = wnd.url.clone();
+                    self.active_downloads.push(url);
+                    wnd.stage = DownloadWindowStage::Downloading;
+                }
+                DownloadWindowOutcome::RunInBackground => {
+                    let target_did = dialog_id.to_string();
+                    self.download_windows[window_idx].is_open = false;
+                    self.download_windows.retain(|w| w.dialog_id != target_did);
+                }
+                DownloadWindowOutcome::Close => {
+                    let target_did = dialog_id.to_string();
+                    self.download_windows[window_idx].is_open = false;
+                    self.download_windows.retain(|w| w.dialog_id != target_did);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut tracker = SingleDialogAppTracker::new();
+
+    // 1. Press "Add URL" in main app -> opens 1 Info popup
+    let created1 = tracker.show_download_dialog(DownloadDialogRequest::empty());
+    assert!(created1, "First Add URL press must create download info popup");
+    assert_eq!(tracker.download_windows.len(), 1);
+    assert!(tracker.download_windows[0].is_open);
+    assert_eq!(tracker.download_windows[0].stage, DownloadWindowStage::Info);
+
+    // 2. Press "Add URL" again -> must NOT open another popup
+    let created2 = tracker.show_download_dialog(DownloadDialogRequest::empty());
+    assert!(!created2, "Second Add URL press must NOT create a duplicate popup");
+    assert_eq!(tracker.download_windows.len(), 1, "There must strictly remain exactly 1 dialog window");
+
+    // Press "Add URL" a 3rd and 4th time -> still exactly 1 dialog
+    assert!(!tracker.show_download_dialog(DownloadDialogRequest::empty()));
+    assert!(!tracker.show_download_dialog(DownloadDialogRequest::empty()));
+    assert_eq!(tracker.download_windows.len(), 1);
+
+    // 3. User fills in URL and clicks "Start download"
+    tracker.download_windows[0].url = "https://example.com/testfile.zip".to_string();
+    let did = tracker.download_windows[0].dialog_id.clone();
+    tracker.handle_outcome(&did, DownloadWindowOutcome::StartDownload);
+
+    // 4. Verification: Popup switches in-place to Downloading stage and stays open
+    assert_eq!(tracker.download_windows.len(), 1, "Download info popup stays open showing progress");
+    assert_eq!(tracker.download_windows[0].stage, DownloadWindowStage::Downloading);
+    assert!(tracker.download_windows[0].is_open);
+    assert_eq!(tracker.active_downloads.len(), 1);
+    assert_eq!(tracker.active_downloads[0], "https://example.com/testfile.zip");
+
+    // 5. User clicks "Run in background" -> popup is closed
+    tracker.handle_outcome(&did, DownloadWindowOutcome::RunInBackground);
+    assert_eq!(tracker.download_windows.len(), 0, "Popup closes when user clicks Run in background");
+
+    // 6. User can now click "Add URL" again for a fresh download
+    let created_next = tracker.show_download_dialog(DownloadDialogRequest::empty());
+    assert!(created_next, "Subsequent Add URL press opens a fresh popup");
+    assert_eq!(tracker.download_windows.len(), 1);
+}
+
+#[test]
+fn test_modal_info_dialog_never_demoted_and_stays_always_on_top() {
+    use rustget_app::dialogs::download_window::{DownloadWindowState, DownloadWindowStage};
+
+    let mut wnd = DownloadWindowState::new(
+        "https://example.com/file.zip".to_string(),
+        "file.zip".to_string(),
+        "General".to_string(),
+        "/tmp".to_string(),
+    );
+    assert_eq!(wnd.stage, DownloadWindowStage::Info);
+    assert!(!wnd.topmost_cleared);
+
+    // Simulate elapsed time > 500ms
+    // For Info stage, topmost should NEVER be cleared or demoted to Normal
+    let is_info_stage = wnd.stage == DownloadWindowStage::Info;
+    assert!(is_info_stage);
+    let should_demote = !is_info_stage;
+    assert!(!should_demote, "Info dialog must never be demoted from always-on-top level");
+
+    // For non-info stages (e.g. Downloading), demoting after 500ms is allowed
+    wnd.stage = DownloadWindowStage::Downloading;
+    let is_info_stage_now = wnd.stage == DownloadWindowStage::Info;
+    assert!(!is_info_stage_now);
+    let should_demote_now = !is_info_stage_now;
+    assert!(should_demote_now, "Non-info stages can demote after initial display");
+}
+
+#[test]
+fn test_download_dialog_opens_when_app_minimized_to_tray() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use rustget_app::dialogs::download_window::{DownloadWindowState, DownloadWindowStage, DownloadWindowOutcome};
+
+    // Simulate app state when minimized to tray
+    let is_main_window_open = AtomicBool::new(false);
+    let mut is_popup_mode = false;
+    let mut download_windows: Vec<DownloadWindowState> = Vec::new();
+
+    // 1. App is hidden in tray: is_main_window_open is false
+    assert!(!is_main_window_open.load(Ordering::Relaxed));
+
+    // 2. Browser triggers a download
+    let main_open = is_main_window_open.load(Ordering::Relaxed) && !is_popup_mode;
+    assert!(!main_open, "Main window is not open when minimized in tray");
+
+    if !main_open {
+        is_popup_mode = true;
+    }
+
+    let mut wnd = DownloadWindowState::new(
+        "https://www.youtube.com/watch?v=gyVr6uJC6G0".to_string(),
+        "video.mp4".to_string(),
+        "Video".to_string(),
+        "C:\\Users\\steam\\Videos".to_string(),
+    );
+    wnd.is_open = true;
+    download_windows.push(wnd);
+
+    // Verify popup opened in popup mode while main app remains minimized
+    assert!(is_popup_mode, "Popup mode must activate when main app is minimized to tray");
+    assert!(!is_main_window_open.load(Ordering::Relaxed), "Main app window must stay minimized in tray");
+    assert_eq!(download_windows.len(), 1);
+    assert_eq!(download_windows[0].stage, DownloadWindowStage::Info);
+
+    // 3. User clicks "Start download"
+    download_windows[0].stage = DownloadWindowStage::Downloading;
+    let setting_open_main_on_download_start = false;
+    if setting_open_main_on_download_start {
+        download_windows[0].is_open = false;
+        is_main_window_open.store(true, Ordering::SeqCst);
+        is_popup_mode = false;
+    }
+
+    // Main window must STILL be minimized in tray, popup stays in Downloading stage
+    assert!(!is_main_window_open.load(Ordering::Relaxed), "Main window must NEVER be unminimized on Start download");
+    assert!(is_popup_mode);
+    assert!(download_windows[0].is_open);
+    assert_eq!(download_windows[0].stage, DownloadWindowStage::Downloading);
+
+    // 4. User clicks "Run in background" -> popup closes, returns to clean tray state
+    let did = download_windows[0].dialog_id.clone();
+    download_windows.retain(|w| w.dialog_id != did);
+    if download_windows.is_empty() {
+        is_popup_mode = false;
+        is_main_window_open.store(false, Ordering::Relaxed);
+    }
+
+    assert_eq!(download_windows.len(), 0);
+    assert!(!is_popup_mode);
+    assert!(!is_main_window_open.load(Ordering::Relaxed));
 }

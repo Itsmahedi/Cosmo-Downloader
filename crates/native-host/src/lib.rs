@@ -10,6 +10,8 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 extern "system" {
     fn AllowSetForegroundWindow(dwProcessId: u32) -> i32;
+    fn OpenMutexA(dwDesiredAccess: u32, bInheritHandle: i32, lpName: *const i8) -> *mut std::ffi::c_void;
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
 }
 
 #[cfg(windows)]
@@ -23,7 +25,6 @@ use rustget_core::{
 
 const HOST_NAME: &str = "com.cosmodownloader.downloader";
 const LEGACY_HOST_NAME: &str = "com.rustget.downloader";
-const LOCAL_BRIDGE_URL: &str = "http://127.0.0.1:42424/download";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +33,9 @@ enum HostAction {
     Download,
     Status,
     Launch,
+    Formats,
+    #[serde(alias = "video_formats", alias = "getVideoFormats")]
+    VideoFormats,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,9 +48,14 @@ struct ExtensionMessage {
     referer: Option<String>,
     user_agent: Option<String>,
     num_segments: Option<usize>,
+    quality: Option<String>,
+    size: Option<u64>,
+    size_formatted: Option<String>,
+    is_approx: Option<bool>,
+    format_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 struct HostResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +68,8 @@ struct HostResponse {
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    formats: Option<rustget_core::youtube::CompactVideoFormats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -140,6 +151,7 @@ pub async fn run() -> anyhow::Result<()> {
                 host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 message: None,
                 task_id: None,
+                formats: None,
                 error: Some(format!("Invalid JSON request: {}", e)),
             },
         };
@@ -171,24 +183,33 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
             host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             message: Some(format!("pong: Cosmo Downloader Host v{}", env!("CARGO_PKG_VERSION"))),
             task_id: None,
+            formats: None,
             error: None,
         },
         Some(HostAction::Status) => {
-            let running = check_bridge_health().await;
+            let (running, port) = check_bridge_health().await;
+            let process_alive = is_app_running_on_system();
+            let is_running = running || process_alive;
             HostResponse {
                 success: true,
-                app_running: Some(running),
-                already_running: None,
+                app_running: Some(is_running),
+                already_running: Some(is_running),
                 host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                message: Some(if running { "CosmoDownloader GUI is active".to_string() } else { "CosmoDownloader GUI is offline".to_string() }),
+                message: Some(if is_running {
+                    format!("CosmoDownloader GUI is active (port {})", if port > 0 { port } else { 24242 })
+                } else {
+                    "CosmoDownloader GUI is offline".to_string()
+                }),
                 task_id: None,
+                formats: None,
                 error: None,
             }
         }
         Some(HostAction::Launch) => {
-            let running = check_bridge_health().await;
+            let (running, port) = check_bridge_health().await;
+            let process_alive = is_app_running_on_system();
             if running {
-                let _ = trigger_show_window().await;
+                let _ = trigger_show_window(port).await;
                 HostResponse {
                     success: true,
                     app_running: Some(true),
@@ -196,6 +217,23 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                     host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     message: Some("CosmoDownloader is already running; brought to front".to_string()),
                     task_id: None,
+                    formats: None,
+                    error: None,
+                }
+            } else if process_alive {
+                let _ = trigger_show_window(0).await;
+                #[cfg(windows)]
+                unsafe {
+                    AllowSetForegroundWindow(ASFW_ANY);
+                }
+                HostResponse {
+                    success: true,
+                    app_running: Some(true),
+                    already_running: Some(true),
+                    host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    message: Some("CosmoDownloader is already running; brought to front via IPC".to_string()),
+                    task_id: None,
+                    formats: None,
                     error: None,
                 }
             } else if let Some(exe_path) = find_app_exe() {
@@ -225,6 +263,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                         message: Some("CosmoDownloader spawned successfully".to_string()),
                         task_id: None,
+                        formats: None,
                         error: None,
                     },
                     Err(e) => HostResponse {
@@ -234,6 +273,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                         message: None,
                         task_id: None,
+                        formats: None,
                         error: Some(format!("Failed to spawn CosmoDownloader: {}", e)),
                     },
                 }
@@ -245,12 +285,54 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                     host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     message: None,
                     task_id: None,
+                    formats: None,
                     error: Some("CosmoDownloader executable not found".to_string()),
                 }
             }
         }
+        Some(HostAction::Formats) | Some(HostAction::VideoFormats) => {
+            let url = match msg.url.as_deref() {
+                Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+                _ => {
+                    return HostResponse {
+                        success: false,
+                        error: Some("Missing 'url' parameter in formats request".to_string()),
+                        ..Default::default()
+                    };
+                }
+            };
+
+            let (running, port) = check_bridge_health().await;
+            if running {
+                if let Ok(formats) = forward_formats_to_bridge_server(port, &url).await {
+                    return HostResponse {
+                        success: true,
+                        app_running: Some(true),
+                        message: Some("Formats retrieved via CosmoDownloader bridge".to_string()),
+                        formats: Some(formats),
+                        ..Default::default()
+                    };
+                }
+            }
+
+            match rustget_core::youtube::query_video_formats(&url).await {
+                Ok(formats) => HostResponse {
+                    success: true,
+                    app_running: Some(running),
+                    message: Some("Formats retrieved directly".to_string()),
+                    formats: Some(formats),
+                    ..Default::default()
+                },
+                Err(err) => HostResponse {
+                    success: false,
+                    app_running: Some(running),
+                    error: Some(err),
+                    ..Default::default()
+                },
+            }
+        }
         _ => {
-            let url = match msg.url {
+            let url = match msg.url.as_deref() {
                 Some(u) if !u.trim().is_empty() => u.trim().to_string(),
                 _ => {
                     return HostResponse {
@@ -260,6 +342,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                         message: None,
                         task_id: None,
+                        formats: None,
                         error: Some("Missing 'url' parameter in download request".to_string()),
                     };
                 }
@@ -270,20 +353,61 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
             unsafe {
                 AllowSetForegroundWindow(ASFW_ANY);
             }
-            if let Ok(task_id) = forward_to_bridge_server(&url, &msg.filename, &msg.cookies, &msg.referer, &msg.user_agent, msg.num_segments).await {
-                #[cfg(windows)]
-                unsafe {
-                    AllowSetForegroundWindow(ASFW_ANY);
+            let (running, port) = check_bridge_health().await;
+            if running {
+                if let Ok(task_id) = forward_to_bridge_server(port, &url, &msg).await {
+                    #[cfg(windows)]
+                    unsafe {
+                        AllowSetForegroundWindow(ASFW_ANY);
+                    }
+                    return HostResponse {
+                        success: true,
+                        app_running: Some(true),
+                        already_running: None,
+                        host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                        message: Some("Download sent to CosmoDownloader bridge server".to_string()),
+                        task_id: Some(task_id),
+                        formats: None,
+                        error: None,
+                    };
                 }
-                return HostResponse {
-                    success: true,
-                    app_running: Some(true),
-                    already_running: None,
-                    host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                    message: Some("Download sent to CosmoDownloader bridge server".to_string()),
-                    task_id: Some(task_id),
-                    error: None,
-                };
+            }
+
+            // If app process is running, deliver directly to its IPC requests queue
+            if is_app_running_on_system() {
+                if let Some(base) = directories::BaseDirs::new() {
+                    let ipc_dir = base.data_local_dir().join("CosmoDownloader").join("ipc_requests");
+                    let _ = std::fs::create_dir_all(&ipc_dir);
+                    let payload = serde_json::json!({
+                        "url": url,
+                        "filename": msg.filename,
+                        "cookies": msg.cookies,
+                        "referer": msg.referer,
+                        "user_agent": msg.user_agent,
+                        "num_segments": msg.num_segments.unwrap_or(8),
+                        "quality": msg.quality,
+                        "size": msg.size,
+                        "size_formatted": msg.size_formatted,
+                        "is_approx": msg.is_approx,
+                        "format_id": msg.format_id,
+                    });
+                    if std::fs::write(ipc_dir.join(format!("req_{}.json", uuid::Uuid::new_v4())), payload.to_string()).is_ok() {
+                        #[cfg(windows)]
+                        unsafe {
+                            AllowSetForegroundWindow(ASFW_ANY);
+                        }
+                        return HostResponse {
+                            success: true,
+                            app_running: Some(true),
+                            already_running: Some(true),
+                            host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                            message: Some("Download sent to running CosmoDownloader via IPC".to_string()),
+                            task_id: Some("ipc".to_string()),
+                            formats: None,
+                            error: None,
+                        };
+                    }
+                }
             }
 
             // If GUI/bridge is offline, launch on-demand popup
@@ -301,6 +425,11 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                     "referer": msg.referer,
                     "user_agent": msg.user_agent,
                     "num_segments": msg.num_segments.unwrap_or(8),
+                    "quality": msg.quality,
+                    "size": msg.size,
+                    "size_formatted": msg.size_formatted,
+                    "is_approx": msg.is_approx,
+                    "format_id": msg.format_id,
                 });
                 if std::fs::write(&temp_file, payload.to_string()).is_ok() {
                     let mut popup_cmd = Command::new(&exe);
@@ -313,10 +442,10 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         const CREATE_NO_WINDOW: u32 = 0x08000000;
                         popup_cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
                     }
-                    popup_cmd.arg("--popup-file").arg(&temp_file);
-                    let spawn_res = popup_cmd.spawn();
+                    popup_cmd.arg("--from-extension").arg("--popup-file").arg(&temp_file);
+                    let _spawn_res = popup_cmd.spawn();
                     #[cfg(windows)]
-                    if let Ok(ref child) = spawn_res {
+                    if let Ok(ref child) = _spawn_res {
                         unsafe {
                             AllowSetForegroundWindow(child.id());
                             AllowSetForegroundWindow(ASFW_ANY);
@@ -330,6 +459,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                         host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                         message: Some("CosmoDownloader on-demand popup opened".to_string()),
                         task_id: Some("popup".to_string()),
+                        formats: None,
                         error: None,
                     };
                 }
@@ -344,6 +474,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                     host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     message: Some("Download saved directly to CosmoDownloader database queue".to_string()),
                     task_id: Some(task_id),
+                    formats: None,
                     error: None,
                 },
                 Err(e) => HostResponse {
@@ -353,6 +484,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                     host_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     message: None,
                     task_id: None,
+                    formats: None,
                     error: Some(format!("Failed to queue download: {}", e)),
                 },
             }
@@ -360,25 +492,64 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
     }
 }
 
-async fn check_bridge_health() -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
-        .build();
-    if let Ok(c) = client {
-        if let Ok(resp) = c.get("http://127.0.0.1:42424/health").send().await {
-            return resp.status().is_success();
+fn is_app_running_on_system() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        let h_mutex = OpenMutexA(
+            0x00100000 | 0x0001, // SYNCHRONIZE | MUTEX_MODIFY_STATE
+            0,
+            c"CosmoDownloader_v1_0_SingleInstance_Mutex".as_ptr().cast(),
+        );
+        if !h_mutex.is_null() {
+            CloseHandle(h_mutex);
+            return true;
         }
     }
     false
 }
 
+fn get_active_bridge_port() -> Option<u16> {
+    if let Some(base) = directories::BaseDirs::new() {
+        let port_file = base.data_local_dir().join("CosmoDownloader").join("bridge_port.txt");
+        if let Ok(content) = std::fs::read_to_string(&port_file) {
+            if let Ok(port) = content.trim().parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+async fn check_bridge_health() -> (bool, u16) {
+    let mut candidate_ports = vec![42424, 24242, 18765];
+    if let Some(active) = get_active_bridge_port() {
+        candidate_ports.retain(|&p| p != active);
+        candidate_ports.insert(0, active);
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(400))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, 0),
+    };
+
+    for port in candidate_ports {
+        let url = format!("http://127.0.0.1:{}/health", port);
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return (true, port);
+            }
+        }
+    }
+    (false, 0)
+}
+
 async fn forward_to_bridge_server(
+    port: u16,
     url: &str,
-    filename: &Option<String>,
-    cookies: &Option<String>,
-    referer: &Option<String>,
-    user_agent: &Option<String>,
-    num_segments: Option<usize>,
+    msg: &ExtensionMessage,
 ) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -386,20 +557,27 @@ async fn forward_to_bridge_server(
 
     let payload = serde_json::json!({
         "url": url,
-        "filename": filename,
-        "cookies": cookies,
-        "referer": referer,
-        "user_agent": user_agent,
-        "num_segments": num_segments.unwrap_or(8),
+        "filename": msg.filename,
+        "cookies": msg.cookies,
+        "referer": msg.referer,
+        "user_agent": msg.user_agent,
+        "num_segments": msg.num_segments.unwrap_or(8),
+        "quality": msg.quality,
+        "size": msg.size,
+        "size_formatted": msg.size_formatted,
+        "is_approx": msg.is_approx,
+        "format_id": msg.format_id,
     });
 
-    let resp = client.post(LOCAL_BRIDGE_URL)
+    let bridge_url = format!("http://127.0.0.1:{}/download", port);
+    let resp = client.post(&bridge_url)
         .header("Content-Type", "application/json")
         .body(payload.to_string())
         .send()
         .await?;
 
-    if resp.status().is_success() {
+    let status = resp.status();
+    if status.is_success() {
         let body_str = resp.text().await?;
         let v: serde_json::Value = serde_json::from_str(&body_str)?;
         if let Some(task_id) = v.get("task_id").and_then(|t| t.as_str()) {
@@ -408,7 +586,36 @@ async fn forward_to_bridge_server(
         return Ok("queued".to_string());
     }
 
-    anyhow::bail!("Bridge server returned status: {}", resp.status())
+    anyhow::bail!("Bridge server returned status: {}", status)
+}
+
+async fn forward_formats_to_bridge_server(
+    port: u16,
+    url: &str,
+) -> anyhow::Result<rustget_core::youtube::CompactVideoFormats> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+
+    let bridge_url = format!("http://127.0.0.1:{}/formats", port);
+    let payload = serde_json::json!({ "url": url });
+    let resp = client.post(&bridge_url)
+        .header("Content-Type", "application/json")
+        .body(payload.to_string())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if status.is_success() {
+        let body_str = resp.text().await?;
+        let v: serde_json::Value = serde_json::from_str(&body_str)?;
+        if let Some(formats_val) = v.get("formats") {
+            let formats: rustget_core::youtube::CompactVideoFormats = serde_json::from_value(formats_val.clone())?;
+            return Ok(formats);
+        }
+    }
+
+    anyhow::bail!("Bridge server returned status: {}", status)
 }
 
 async fn queue_directly_in_db(
@@ -504,15 +711,26 @@ fn find_app_exe() -> Option<PathBuf> {
     None
 }
 
-async fn trigger_show_window() -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(800))
-        .build()?;
-    let token = rustget_core::server::get_or_create_bridge_token();
-    let _ = client.post("http://127.0.0.1:42424/show")
-        .header("X-Cosmo-Token", token.trim())
-        .send()
-        .await;
+async fn trigger_show_window(port: u16) -> anyhow::Result<()> {
+    if port > 0 {
+        if let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(800))
+            .build()
+        {
+            let token = rustget_core::server::get_or_create_bridge_token();
+            let show_url = format!("http://127.0.0.1:{}/show", port);
+            let _ = client.post(&show_url)
+                .header("X-Cosmo-Token", token.trim())
+                .send()
+                .await;
+        }
+    }
+    // Also signal via file IPC as fallback
+    if let Some(base) = directories::BaseDirs::new() {
+        let ipc_dir = base.data_local_dir().join("CosmoDownloader").join("ipc_requests");
+        let _ = std::fs::create_dir_all(&ipc_dir);
+        let _ = std::fs::write(ipc_dir.join(format!("show_{}.json", uuid::Uuid::new_v4())), "{}");
+    }
     Ok(())
 }
 

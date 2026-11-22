@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Margin, Pos2, Stroke, Vec2};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tray_icon::TrayIcon;
 
 use rustget_core::{
     categorize,
@@ -26,6 +25,71 @@ use crate::theme::{self, shapes};
 pub const ICON_RGBA: &[u8] = include_bytes!("icon_32.rgba");
 pub const APP_TITLE: &str = "Cosmo Downloader";
 pub const DOWNLOAD_FILE_INFO_TITLE: &str = "Download File Info";
+
+static GLOBAL_QUEUE: std::sync::OnceLock<Arc<QueueManager>> = std::sync::OnceLock::new();
+static GLOBAL_TOKIO_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+static GLOBAL_POPUP_FILE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_global_queue(q: Arc<QueueManager>) {
+    let _ = GLOBAL_QUEUE.set(q);
+}
+
+pub fn get_global_queue() -> Option<Arc<QueueManager>> {
+    GLOBAL_QUEUE.get().cloned()
+}
+
+pub fn set_tokio_handle(handle: tokio::runtime::Handle) {
+    let _ = GLOBAL_TOKIO_HANDLE.set(handle);
+}
+
+pub fn get_tokio_handle() -> Option<tokio::runtime::Handle> {
+    GLOBAL_TOKIO_HANDLE.get().cloned()
+}
+
+pub fn set_global_popup_file(popup_file: Option<String>) {
+    if let Ok(mut guard) = GLOBAL_POPUP_FILE.lock() {
+        *guard = popup_file;
+    }
+}
+
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(Ordering::SeqCst)
+}
+
+pub fn direct_graceful_shutdown() -> ! {
+    if !SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        platform::log_daemon("Direct graceful shutdown requested; destroying tray icon & saving active state...");
+        
+        // 1. Immediately destroy tray icon so Windows removes it without delay or ghosting
+        platform::destroy_system_tray();
+        
+        // 2. Remove temporary standalone popup file if present
+        if let Ok(mut guard) = GLOBAL_POPUP_FILE.lock() {
+            if let Some(ref p) = *guard {
+                let _ = std::fs::remove_file(p);
+            }
+            *guard = None;
+        }
+        
+        // 3. Gracefully stop active tasks, save DB records, and flush WAL
+        if let Some(q) = get_global_queue() {
+            let q = Arc::clone(&q);
+            if let Some(rt) = get_tokio_handle() {
+                rt.block_on(async move {
+                    q.shutdown_and_save().await;
+                });
+            } else if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.block_on(async move {
+                    q.shutdown_and_save().await;
+                });
+            }
+        }
+        
+        platform::log_daemon("Direct graceful shutdown complete.");
+    }
+    std::process::exit(0);
+}
 
 pub fn compute_status_counts(downloads: &[DownloadRecord]) -> nav_rail::StatusCounts {
     let mut counts = nav_rail::StatusCounts {
@@ -74,6 +138,55 @@ pub fn compute_category_counts(downloads: &[DownloadRecord]) -> CategoryCounts {
     counts
 }
 
+pub const MAIN_VIEWPORT_ID: &str = "main_viewport";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchOrigin {
+    User,
+    Autostart,
+    Extension,
+    Protocol,
+    Clipboard,
+}
+
+pub fn determine_launch_origin(args: &[String]) -> LaunchOrigin {
+    for a in args.iter().skip(1) {
+        let clean = a.trim_matches('"').trim_matches('\'');
+        if clean == "--from-extension" || clean == "--popup-file" || clean.starts_with("--popup-file=") || clean == "--popup" {
+            return LaunchOrigin::Extension;
+        }
+        if clean == "--minimized" || clean == "--daemon" || clean == "--autostart" {
+            return LaunchOrigin::Autostart;
+        }
+        if clean == "--clipboard" {
+            return LaunchOrigin::Clipboard;
+        }
+        if clean == "--add-url" || clean.starts_with("--add-url=")
+            || clean.starts_with("cosmodownloader://")
+            || clean.starts_with("rustget://")
+            || clean.starts_with("http://")
+            || clean.starts_with("https://")
+            || clean.starts_with("magnet:")
+            || clean.ends_with(".torrent")
+            || clean.ends_with(".TORRENT")
+        {
+            return LaunchOrigin::Protocol;
+        }
+    }
+    LaunchOrigin::User
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainWindowReason {
+    UserLaunchedManually,
+    TrayLeftClick,
+    TrayMenuOpen,
+    SecondInstanceLaunchedByUser,
+    UserClickedOpenMainWindow,
+    SettingOpenMainOnDownloadStart,
+    Forbidden(&'static str),
+}
+
 #[derive(Clone, Debug)]
 pub struct DownloadDialogRequest {
     pub url: String,
@@ -94,6 +207,12 @@ impl DownloadDialogRequest {
             user_agent: None,
             num_segments: None,
         }
+    }
+}
+
+impl Default for DownloadDialogRequest {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -173,9 +292,10 @@ pub struct CosmoDownloaderApp {
     pub setting_start_minimized: bool,
     pub setting_dont_show_complete_dialog: bool,
     pub is_main_window_open: Arc<AtomicBool>,
+    pub options_dialog_state: Option<OptionsDialogState>,
 
     // System tray
-    pub tray_icon: Option<TrayIcon>,
+    pub has_tray_icon: bool,
     pub tray_tx: std::sync::mpsc::Sender<String>,
     pub tray_event_receiver: Option<std::sync::mpsc::Receiver<String>>,
 
@@ -256,7 +376,16 @@ impl CosmoDownloaderApp {
         }
 
         #[cfg(windows)]
-        platform::windows::init_shutdown_listener(&cc.egui_ctx);
+        {
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = cc.window_handle() {
+                if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
+                    platform::windows::set_main_dashboard_window(hwnd);
+                }
+            }
+            platform::windows::init_shutdown_listener(&cc.egui_ctx);
+        }
 
         let is_popup_arg = std::env::args().skip(1).any(|a| {
             let clean = a.trim_matches('"').trim_matches('\'');
@@ -277,6 +406,7 @@ impl CosmoDownloaderApp {
         let db = Database::open_default().unwrap_or_else(|_| Database::open_in_memory().unwrap());
         let (event_tx, event_rx) = mpsc::channel(128);
         let queue = Arc::new(QueueManager::new(db.clone(), 3, 0, event_tx));
+        set_global_queue(Arc::clone(&queue));
 
         platform::ensure_native_host_registered();
 
@@ -296,7 +426,7 @@ impl CosmoDownloaderApp {
             let ctx_wake = cc.egui_ctx.clone();
             let ctx_wake_dl = cc.egui_ctx.clone();
             let ctx_wake_quit = cc.egui_ctx.clone();
-            let _is_main_open_wake = Arc::clone(&is_main_open);
+            let is_main_open_wake = Arc::clone(&is_main_open);
             let bridge_server = BridgeServer::new(Arc::clone(&queue), 42424)
                 .with_notifier(bridge_tx)
                 .with_show_notifier(show_tx)
@@ -310,6 +440,14 @@ impl CosmoDownloaderApp {
                     ctx_wake.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
                 })
                 .with_download_wake_callback(move || {
+                    #[cfg(windows)]
+                    platform::windows::grant_foreground_permission();
+                    if !is_main_open_wake.load(Ordering::Relaxed) {
+                        #[cfg(windows)]
+                        platform::windows::show_download_popup_window();
+                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx_wake_dl.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    }
                     ctx_wake_dl.request_repaint();
                 });
 
@@ -484,14 +622,13 @@ impl CosmoDownloaderApp {
 
         let (tray_tx, tray_event_receiver) = std::sync::mpsc::channel();
         // Always initialize tray icon on the primary single-instance process (even if launched via --popup-file)
-        let tray_icon = if !daemon_online && saved_show_tray {
+        let has_tray_icon = if !daemon_online && saved_show_tray {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 platform::build_system_tray(&tray_tx, cc.egui_ctx.clone(), ICON_RGBA, APP_TITLE)
             }))
-            .ok()
-            .flatten()
+            .unwrap_or(false)
         } else {
-            None
+            false
         };
 
         let initial_downloads = {
@@ -536,7 +673,10 @@ impl CosmoDownloaderApp {
 
             is_popup_mode: is_popup_arg,
             is_standalone_popup,
-            standalone_popup_file,
+            standalone_popup_file: {
+                set_global_popup_file(standalone_popup_file.clone());
+                standalone_popup_file
+            },
             popup_opened_at: if is_popup_arg { Some(std::time::Instant::now()) } else { None },
             show_add_dialog: is_popup_arg,
             show_settings_dialog: false,
@@ -594,8 +734,9 @@ impl CosmoDownloaderApp {
             setting_start_minimized: saved_start_min,
             setting_dont_show_complete_dialog: saved_dont_complete,
             is_main_window_open: is_main_open,
+            options_dialog_state: None,
 
-            tray_icon,
+            has_tray_icon,
             tray_tx,
             tray_event_receiver: Some(tray_event_receiver),
 
@@ -715,6 +856,12 @@ impl CosmoDownloaderApp {
                     app.download_windows.push(wnd2);
                     return app;
                 }
+                "options" => {
+                    app.is_popup_mode = false;
+                    app.is_main_window_open.store(true, Ordering::SeqCst);
+                    app.open_options_dialog();
+                    return app;
+                }
                 _ => {}
             }
             app.download_windows.push(wnd);
@@ -760,21 +907,11 @@ impl CosmoDownloaderApp {
     /// Cancels active tasks cleanly (preserving them as `'queued'` for auto-resume),
     /// flushes SQLite WAL, removes tray icon & temp popup files, and exits cleanly.
     pub fn perform_graceful_shutdown(&mut self) -> ! {
-        if !self.shutting_down {
-            self.shutting_down = true;
-            platform::log_daemon("Graceful shutdown requested; saving active downloads and DB state...");
-            self.tray_icon = None;
-            if let Some(ref p) = self.standalone_popup_file {
-                let _ = std::fs::remove_file(p);
-            }
-            let q = Arc::clone(&self.queue);
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async move {
-                q.shutdown_and_save().await;
-            });
-            platform::log_daemon("Graceful shutdown complete.");
+        if let Some(ref p) = self.standalone_popup_file {
+            let _ = std::fs::remove_file(p);
         }
-        std::process::exit(0);
+        self.has_tray_icon = false;
+        direct_graceful_shutdown();
     }
 
     pub fn refresh_downloads(&mut self) {
@@ -988,7 +1125,8 @@ impl CosmoDownloaderApp {
         }
 
         // STEP 2: Up to 5 windows open at once. Extra ones wait in queue.
-        let open_count = self.download_windows.iter().filter(|w| w.is_open).count();
+        self.download_windows.retain(|w| w.is_open);
+        let open_count = self.download_windows.len();
         if open_count >= 5 {
             platform::log_daemon(&format!(
                 "QUEUE: 5 dialogs already open, queueing request for '{}'",
@@ -1085,23 +1223,52 @@ impl CosmoDownloaderApp {
             new_idx, key, win_pos.x, win_pos.y, cascade_idx
         );
 
-        let from_extension = source == "extension" || source == "standalone_req" || source == "force_show_add" || source == "initial_url_arg";
-        if from_extension || self.is_popup_mode || !self.is_main_window_open.load(Ordering::Relaxed) {
+        let _from_extension = source == "extension" || source == "standalone_req" || source == "force_show_add" || source == "initial_url_arg";
+        let main_open = self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode;
+        if !main_open {
             self.is_popup_mode = true;
             #[cfg(windows)]
-            platform::windows::show_download_popup_window();
+            if open_count == 0 {
+                platform::windows::show_download_popup_window();
+            }
             if let Some(c) = ctx {
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                c.send_viewport_cmd(egui::ViewportCommand::Focus);
-                c.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                c.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-                c.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                    crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
-                    crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
-                )));
-                let (cx, cy) = platform::get_dialog_center_pos(false, crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH, crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT);
-                c.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(cx, cy)));
+                if open_count == 0 {
+                    c.send_viewport_cmd(egui::ViewportCommand::Title(DOWNLOAD_FILE_INFO_TITLE.to_string()));
+                    c.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    c.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    c.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                    c.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                    c.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    )));
+                    c.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    )));
+                    c.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    )));
+                    c.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
+                    let (cx, cy) = platform::get_dialog_center_pos(false, crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH, crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT);
+                    c.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(cx, cy)));
+                } else {
+                    let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", _dialog_id));
+                    c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Focus);
+                    c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+                }
+            }
+        } else {
+            // Main window is already open: show the "Download File Info" popup in an independent viewport window
+            self.download_windows[new_idx].is_open = true;
+            #[cfg(windows)]
+            platform::windows::grant_foreground_permission();
+            if let Some(c) = ctx {
+                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", _dialog_id));
+                c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Focus);
+                c.send_viewport_cmd_to(vp_id, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
             }
         }
 
@@ -1272,6 +1439,17 @@ impl CosmoDownloaderApp {
         };
         match outcome {
             DownloadWindowOutcome::None => {}
+            DownloadWindowOutcome::Minimize => {
+                let target_did = dialog_id.to_string();
+                if self.is_popup_mode && self.download_windows.first().map(|w| w.dialog_id.as_str()) == Some(dialog_id) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                } else {
+                    let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", target_did));
+                    ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Minimized(true));
+                }
+                #[cfg(windows)]
+                platform::windows::minimize_dialog_window();
+            }
             DownloadWindowOutcome::StartDownload => {
                 platform::log_daemon(&format!("STEP: Start pressed: dialog_id='{}'", dialog_id));
                 let key = rustget_core::youtube::normalize_url_key(&self.download_windows[window_idx].url);
@@ -1280,17 +1458,20 @@ impl CosmoDownloaderApp {
                 }
                 self.trigger_download_for_window(window_idx, false);
                 if self.setting_open_main_on_download_start {
-                    self.is_popup_mode = false;
-                    self.restore_main_window_chrome(ctx);
-                    platform::show_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    self.is_main_window_open.store(true, Ordering::Relaxed);
+                    self.download_windows[window_idx].is_open = false;
+                    let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", dialog_id));
+                    ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                    self.show_main_window(MainWindowReason::SettingOpenMainOnDownloadStart, ctx);
                 }
             }
             DownloadWindowOutcome::DownloadLater => {
                 self.trigger_download_for_window(window_idx, true);
+                if self.setting_open_main_on_download_start {
+                    self.download_windows[window_idx].is_open = false;
+                    let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", dialog_id));
+                    ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                    self.show_main_window(MainWindowReason::SettingOpenMainOnDownloadStart, ctx);
+                }
             }
             DownloadWindowOutcome::UrlChanged => {
                 let cat_opt = {
@@ -1312,7 +1493,7 @@ impl CosmoDownloaderApp {
                 }
             }
             DownloadWindowOutcome::OpenSettings => {
-                self.show_settings_dialog = true;
+                self.open_options_dialog();
             }
             DownloadWindowOutcome::Pause => {
                 let wnd = &mut self.download_windows[window_idx];
@@ -1358,13 +1539,17 @@ impl CosmoDownloaderApp {
                         let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
                             || !self.active_progress.is_empty();
                         if !has_active_downloads {
-                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            if self.setting_minimize_to_tray && self.has_tray_icon {
+                                self.is_popup_mode = false;
+                                self.is_main_window_open.store(false, Ordering::Relaxed);
                                 platform::hide_main_window();
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             } else {
                                 self.perform_graceful_shutdown();
                             }
-                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                        } else if self.setting_minimize_to_tray && self.has_tray_icon {
+                            self.is_popup_mode = false;
+                            self.is_main_window_open.store(false, Ordering::Relaxed);
                             platform::hide_main_window();
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
@@ -1416,13 +1601,17 @@ impl CosmoDownloaderApp {
                         let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
                             || !self.active_progress.is_empty();
                         if !has_active_downloads {
-                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            if self.setting_minimize_to_tray && self.has_tray_icon {
+                                self.is_popup_mode = false;
+                                self.is_main_window_open.store(false, Ordering::Relaxed);
                                 platform::hide_main_window();
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             } else {
                                 self.perform_graceful_shutdown();
                             }
-                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                        } else if self.setting_minimize_to_tray && self.has_tray_icon {
+                            self.is_popup_mode = false;
+                            self.is_main_window_open.store(false, Ordering::Relaxed);
                             platform::hide_main_window();
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
@@ -1466,13 +1655,17 @@ impl CosmoDownloaderApp {
                         let has_active_downloads = self.downloads.iter().any(|d| d.status == "downloading" || d.status == "queued")
                             || !self.active_progress.is_empty();
                         if !has_active_downloads {
-                            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                            if self.setting_minimize_to_tray && self.has_tray_icon {
+                                self.is_popup_mode = false;
+                                self.is_main_window_open.store(false, Ordering::Relaxed);
                                 platform::hide_main_window();
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             } else {
                                 self.perform_graceful_shutdown();
                             }
-                        } else if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                        } else if self.setting_minimize_to_tray && self.has_tray_icon {
+                            self.is_popup_mode = false;
+                            self.is_main_window_open.store(false, Ordering::Relaxed);
                             platform::hide_main_window();
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
@@ -1639,6 +1832,156 @@ impl CosmoDownloaderApp {
             }
         }
     }
+
+    pub fn init_options_dialog_state(&mut self) {
+        let speed_unit = if self.setting_global_speed_kb % 1024 == 0 && self.setting_global_speed_kb > 0 {
+            crate::dialogs::settings::SpeedUnit::Mbps
+        } else {
+            crate::dialogs::settings::SpeedUnit::Kbps
+        };
+        let speed_val = if speed_unit == crate::dialogs::settings::SpeedUnit::Mbps {
+            self.setting_global_speed_kb / 1024
+        } else {
+            self.setting_global_speed_kb
+        };
+
+        self.options_dialog_state = Some(OptionsDialogState {
+            active_tab: OptionsTab::General,
+            startup: self.setting_autostart,
+            minstart: self.setting_start_minimized,
+            tray: self.setting_show_tray_icon,
+            mintray: self.setting_minimize_to_tray,
+            threads: self.setting_default_connections,
+            speed: speed_val,
+            unit: speed_unit,
+            folder: self.setting_default_save_dir.clone(),
+            clip: self.clipboard_enabled.load(Ordering::Relaxed),
+            notif: self.setting_notifications_enabled,
+            cwin: !self.setting_dont_show_complete_dialog,
+            openmain: self.setting_open_main_on_download_start,
+            proxy: self.setting_proxy_url.clone(),
+        });
+    }
+
+    pub fn open_options_dialog(&mut self) {
+        self.init_options_dialog_state();
+        self.show_settings_dialog = true;
+    }
+
+    pub fn show_main_window(&mut self, reason: MainWindowReason, ctx: &egui::Context) -> bool {
+        platform::logger::log_event(Some("WINDOW"), &format!("show_main_window requested: reason={:?}", reason));
+        match reason {
+            MainWindowReason::UserLaunchedManually
+            | MainWindowReason::TrayLeftClick
+            | MainWindowReason::TrayMenuOpen
+            | MainWindowReason::SecondInstanceLaunchedByUser
+            | MainWindowReason::UserClickedOpenMainWindow => {
+                // Allowed
+            }
+            MainWindowReason::SettingOpenMainOnDownloadStart => {
+                if !self.setting_open_main_on_download_start {
+                    platform::logger::log_event(Some("WINDOW"), "show_main_window REJECTED: setting_open_main_on_download_start is false");
+                    return false;
+                }
+            }
+            MainWindowReason::Forbidden(r) => {
+                platform::logger::log_event(Some("WINDOW"), &format!("show_main_window REJECTED: forbidden reason {}", r));
+                #[cfg(debug_assertions)]
+                {
+                    panic!("Forbidden attempt to show main window: reason={}", r);
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    return false;
+                }
+            }
+        }
+        self.is_main_window_open.store(true, Ordering::SeqCst);
+        self.is_popup_mode = false;
+        self.restore_main_window_chrome(ctx);
+
+        // When main window is opened, dismiss any popups so dashboard is completely unobstructed
+        for w in &mut self.download_windows {
+            w.is_open = false;
+        }
+
+        // Send to root viewport
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+
+        let main_vp_id = egui::ViewportId::from_hash_of(MAIN_VIEWPORT_ID);
+        ctx.send_viewport_cmd_to(main_vp_id, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(main_vp_id, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(main_vp_id, egui::ViewportCommand::Focus);
+        #[cfg(windows)]
+        {
+            platform::windows::grant_foreground_permission();
+            platform::show_main_window();
+        }
+        true
+    }
+
+    pub fn build_diagnostic_info(&self, ctx: &egui::Context) -> String {
+        let os_name = std::env::consts::OS;
+        let os_arch = std::env::consts::ARCH;
+        let version = env!("CARGO_PKG_VERSION");
+        let ppp = ctx.pixels_per_point();
+        let screen_rect = ctx.screen_rect();
+
+        let mut out = String::new();
+        out.push_str("=====================================================\n");
+        out.push_str("COSMO DOWNLOADER DIAGNOSTIC REPORT\n");
+        out.push_str("=====================================================\n");
+        out.push_str(&format!("App Version: {}\n", version));
+        out.push_str(&format!("Platform: {} {}\n", os_name, os_arch));
+        out.push_str(&format!("Display Scaling: {:.2} (Screen: {:.0}x{:.0})\n", ppp, screen_rect.width(), screen_rect.height()));
+        out.push_str("\n--- SETTINGS (Safe / Sanitized) ---\n");
+        out.push_str(&format!("Theme: {}\n", if self.is_dark { "dark" } else { "light" }));
+        out.push_str(&format!("Clipboard Monitor: {}\n", self.clipboard_enabled.load(Ordering::Relaxed)));
+        out.push_str(&format!("Minimize to Tray: {}\n", self.setting_minimize_to_tray));
+        out.push_str(&format!("Start Minimized: {}\n", self.setting_start_minimized));
+        out.push_str(&format!("Open Main on Download Start: {}\n", self.setting_open_main_on_download_start));
+        out.push_str(&format!("Don't Show Complete Dialog: {}\n", self.setting_dont_show_complete_dialog));
+        out.push_str(&format!("Default Num Segments: {}\n", self.setting_default_connections));
+        out.push_str(&format!("Proxy Configured: {}\n", if self.setting_proxy_url.is_empty() { "None" } else { "Yes (Redacted)" }));
+
+        out.push_str("\n--- OPEN WINDOWS ---\n");
+        out.push_str(&format!("Main Dashboard Window Open: {}\n", self.is_main_window_open.load(Ordering::Relaxed)));
+        out.push_str(&format!("Download Windows Count: {}\n", self.download_windows.len()));
+        for (i, wnd) in self.download_windows.iter().enumerate() {
+            let stage_str = match &wnd.stage {
+                crate::dialogs::download_window::DownloadWindowStage::Info => "Info".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Connecting => "Connecting".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Downloading => "Downloading".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Paused => "Paused".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Processing => "Processing".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Complete => "Complete".to_string(),
+                crate::dialogs::download_window::DownloadWindowStage::Failed { reason } => format!("Failed ({})", reason),
+            };
+            out.push_str(&format!(
+                "  [{}] dialog_id='{}' is_open={} stage={} filename='{}' downloaded={}/{} pos=({:.0},{:.0})\n",
+                i,
+                wnd.dialog_id,
+                wnd.is_open,
+                stage_str,
+                wnd.filename,
+                wnd.disp_downloaded,
+                wnd.disp_total.map(|t| t.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                wnd.window_pos.map(|p| p.x).unwrap_or(0.0),
+                wnd.window_pos.map(|p| p.y).unwrap_or(0.0),
+            ));
+        }
+
+        out.push_str("\n=====================================================\n");
+        out.push_str("RECENT EVENT LOGS (Last 200 lines):\n");
+        out.push_str("=====================================================\n");
+        let recent = platform::logger::get_recent_logs(200);
+        out.push_str(&recent.concat());
+
+        out
+    }
 }
 
 impl eframe::App for CosmoDownloaderApp {
@@ -1702,7 +2045,16 @@ impl eframe::App for CosmoDownloaderApp {
         }
 
         #[cfg(windows)]
-        platform::windows::init_shutdown_listener(ctx);
+        {
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = _frame.window_handle() {
+                if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
+                    platform::windows::set_main_dashboard_window(hwnd);
+                }
+            }
+            platform::windows::init_shutdown_listener(ctx);
+        }
 
         let external_quit = self.quit_rx.try_recv().is_ok()
             || {
@@ -1720,7 +2072,7 @@ impl eframe::App for CosmoDownloaderApp {
             let start_minimized = std::env::args().any(|a| a == "--minimized" || a == "--daemon");
             if start_minimized {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                if self.setting_minimize_to_tray && self.has_tray_icon {
                     platform::hide_main_window();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     self.is_main_window_open.store(false, Ordering::Relaxed);
@@ -1753,7 +2105,7 @@ impl eframe::App for CosmoDownloaderApp {
                     DownloadWindowStage::Info => {
                         self.handle_download_window_outcome(0, DownloadWindowOutcome::Close, ctx);
                     }
-                    DownloadWindowStage::Downloading | DownloadWindowStage::Paused => {
+                    DownloadWindowStage::Connecting | DownloadWindowStage::Downloading | DownloadWindowStage::Paused | DownloadWindowStage::Processing => {
                         self.handle_download_window_outcome(0, DownloadWindowOutcome::RunInBackground, ctx);
                     }
                     DownloadWindowStage::Complete | DownloadWindowStage::Failed { .. } => {
@@ -1763,7 +2115,7 @@ impl eframe::App for CosmoDownloaderApp {
                 return;
             }
 
-            if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+            if self.setting_minimize_to_tray && self.has_tray_icon {
                 platform::log_daemon("Main window close requested -> minimizing to tray");
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 platform::remove_popup_topmost();
@@ -1864,27 +2216,31 @@ impl eframe::App for CosmoDownloaderApp {
                             matched = true;
                             wnd.task_id = id.clone();
                             wnd.stage = DownloadWindowStage::Complete;
-                            wnd.is_open = true;
                             if let Some(tot) = wnd.total_bytes {
                                 wnd.downloaded_bytes = tot;
                                 wnd.disp_downloaded = tot;
                             }
                             platform::set_taskbar_progress(platform::TBPF_NOPROGRESS, 0, 0);
-                            if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                                #[cfg(windows)]
-                                platform::show_main_window();
-                            } else if self.is_popup_mode {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            if !self.setting_dont_show_complete_dialog {
+                                wnd.is_open = true;
+                                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", wnd.dialog_id));
+                                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Minimized(false));
+                                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Focus);
+                                if self.is_popup_mode {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                                }
+                            } else {
+                                wnd.is_open = false;
+                                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", wnd.dialog_id));
+                                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
                             }
                             break;
                         }
                     }
-                    if !matched && !self.setting_dont_show_complete_dialog {
+                    if !matched && !self.setting_dont_show_complete_dialog && self.is_popup_mode {
                         if let Some(rec) = self.downloads.iter().find(|d| d.id == id).cloned() {
                             let mut wnd = DownloadWindowState::new(rec.url, rec.filename, rec.category, rec.target_path.clone());
                             wnd.task_id = id.clone();
@@ -1896,17 +2252,9 @@ impl eframe::App for CosmoDownloaderApp {
                             wnd.stage = DownloadWindowStage::Complete;
                             wnd.is_open = true;
                             self.download_windows.push(wnd);
-                            if self.is_main_window_open.load(Ordering::Relaxed) && !self.is_popup_mode {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                                #[cfg(windows)]
-                                platform::show_main_window();
-                            } else if self.is_popup_mode {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         }
                     }
                 }
@@ -1997,17 +2345,7 @@ impl eframe::App for CosmoDownloaderApp {
         // External show requests
         while self.show_rx.try_recv().is_ok() {
             platform::log_daemon("Received show request via bridge (/show)");
-            if self.is_popup_mode {
-                continue;
-            }
-            self.is_popup_mode = false;
-            self.restore_main_window_chrome(ctx);
-            platform::show_main_window();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-            self.is_main_window_open.store(true, Ordering::Relaxed);
+            self.show_main_window(MainWindowReason::SecondInstanceLaunchedByUser, ctx);
         }
 
         // Browser extension download requests
@@ -2052,16 +2390,21 @@ impl eframe::App for CosmoDownloaderApp {
         };
         for action in tray_actions {
             match action.as_str() {
-                "show" => {
-                    platform::log_daemon("Tray action: show main window");
-                    self.is_popup_mode = false;
-                    self.restore_main_window_chrome(ctx);
-                    platform::show_main_window();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-                    self.is_main_window_open.store(true, Ordering::Relaxed);
+                "tray_click" => {
+                    platform::log_daemon("Tray action: tray click -> show main window");
+                    self.show_main_window(MainWindowReason::TrayLeftClick, ctx);
+                }
+                "tray_menu_open" | "show" => {
+                    platform::log_daemon("Tray action: tray menu open -> show main window");
+                    self.show_main_window(MainWindowReason::TrayMenuOpen, ctx);
+                }
+                "pause_all" => {
+                    platform::log_daemon("Tray action: pause all");
+                    self.pause_all();
+                }
+                "resume_all" => {
+                    platform::log_daemon("Tray action: resume all");
+                    self.resume_all();
                 }
                 "add" => {
                     platform::log_daemon("Tray action: add URL");
@@ -2069,6 +2412,10 @@ impl eframe::App for CosmoDownloaderApp {
                 }
                 "exit" => {
                     self.perform_graceful_shutdown();
+                }
+                "options" => {
+                    self.show_main_window(MainWindowReason::TrayMenuOpen, ctx);
+                    self.open_options_dialog();
                 }
                 _ => {}
             }
@@ -2159,6 +2506,9 @@ impl eframe::App for CosmoDownloaderApp {
                         .with_transparent(false)
                         .with_resizable(false)
                         .with_decorations(false)
+                        .with_minimize_button(true)
+                        .with_close_button(true)
+                        .with_taskbar(true)
                         .with_always_on_top();
 
                     if let Some(pos) = self.download_windows[idx].window_pos {
@@ -2212,7 +2562,7 @@ impl eframe::App for CosmoDownloaderApp {
         // ====================================================================
         // Full Dashboard View (Matches User's HTML UI)
         // ====================================================================
-        let any_dialog_open = self.download_windows.iter().any(|w| w.is_open);
+        let any_dialog_open = self.download_windows.iter().any(|w| w.is_open && w.stage == DownloadWindowStage::Info);
         if !self.show_add_dialog && !self.show_settings_dialog && !any_dialog_open {
             self.handle_borderless_resize(ctx);
         }
@@ -2246,17 +2596,13 @@ impl eframe::App for CosmoDownloaderApp {
             || self.show_settings_dialog
             || self.show_about_dialog
             || !self.pending_delete_ids.is_empty()
-            || self.download_windows.iter().any(|w| w.is_open);
+            || self.download_windows.iter().any(|w| w.is_open && w.stage == DownloadWindowStage::Info);
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if !self.pending_delete_ids.is_empty() {
                 self.pending_delete_ids.clear();
-            } else if let Some(last_open_idx) = self.download_windows.iter().rposition(|w| w.is_open) {
+            } else if let Some(last_open_idx) = self.download_windows.iter().rposition(|w| w.is_open && w.stage == DownloadWindowStage::Info) {
                 let did = self.download_windows[last_open_idx].dialog_id.clone();
-                let outcome = match self.download_windows[last_open_idx].stage {
-                    DownloadWindowStage::Info => DownloadWindowOutcome::Close,
-                    DownloadWindowStage::Downloading | DownloadWindowStage::Paused => DownloadWindowOutcome::CancelClicked,
-                    _ => DownloadWindowOutcome::Close,
-                };
+                let outcome = DownloadWindowOutcome::Close;
                 self.handle_download_window_outcome_by_id(&did, outcome, ctx);
             } else if self.show_add_dialog {
                 self.show_add_dialog = false;
@@ -2306,7 +2652,7 @@ impl eframe::App for CosmoDownloaderApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                 }
                 if act.close {
-                    if self.setting_minimize_to_tray && self.tray_icon.is_some() {
+                    if self.setting_minimize_to_tray && self.has_tray_icon {
                         platform::log_daemon("Main window title bar close clicked -> minimizing to tray");
                         platform::hide_main_window();
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -2366,7 +2712,7 @@ impl eframe::App for CosmoDownloaderApp {
                     self.toggle_theme(ctx);
                 }
                 if m_act.open_options {
-                    self.show_settings_dialog = true;
+                    self.open_options_dialog();
                 }
                 if m_act.toggle_clipboard {
                     self.setting_clipboard_monitor = !self.setting_clipboard_monitor;
@@ -2418,7 +2764,7 @@ impl eframe::App for CosmoDownloaderApp {
                     self.request_delete_selected();
                 }
                 if tb.options_clicked {
-                    self.show_settings_dialog = true;
+                    self.open_options_dialog();
                 }
             });
 
@@ -2632,109 +2978,201 @@ impl eframe::App for CosmoDownloaderApp {
 
         // Options / Settings Modal Dialog (Rendered below download dialogs)
         if self.show_settings_dialog {
-            egui::Window::new("Options")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .frame(
-                    egui::Frame::none()
-                        .fill(pal_refresh.surface)
-                        .stroke(Stroke::new(1.0_f32, pal_refresh.line))
-                        .inner_margin(Margin::same(18.0))
-                        .rounding(shapes::R),
-                )
-                .show(ctx, |ui| {
-                    ui.set_width(420.0);
+            let screen_rect = ctx.screen_rect();
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("options_modal_backdrop")))
+                .rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(110));
+
+            if self.options_dialog_state.is_none() {
+                self.init_options_dialog_state();
+            }
+
+            let mut close_dialog = false;
+            let mut save_dialog = false;
+
+            if let Some(opt_state) = &mut self.options_dialog_state {
+                egui::Window::new("Options###options_modal_window")
+                    .order(egui::Order::Foreground)
+                    .title_bar(false)
+                    .collapsible(false)
+                    .resizable(false)
+                    .fixed_size(Vec2::new(620.0, 490.0))
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(pal_refresh.surface)
+                            .stroke(Stroke::new(1.0_f32, pal_refresh.line))
+                            .inner_margin(Margin::ZERO)
+                            .rounding(shapes::R)
+                            .shadow(egui::epaint::Shadow {
+                                offset: Vec2::new(0.0, 8.0),
+                                blur: 24.0,
+                                spread: 0.0,
+                                color: egui::Color32::from_black_alpha(120),
+                            }),
+                    )
+                    .show(ctx, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        let outcome = render_options_window_content(
+                            ui,
+                            pal_refresh,
+                            self.logo_texture.as_ref(),
+                            opt_state,
+                        );
+                        match outcome {
+                            OptionsDialogOutcome::Save => {
+                                save_dialog = true;
+                                close_dialog = true;
+                            }
+                            OptionsDialogOutcome::Cancel => {
+                                close_dialog = true;
+                            }
+                            OptionsDialogOutcome::None => {}
+                        }
+                    });
+            }
+
+            if save_dialog {
+                if let Some(opt_state) = &self.options_dialog_state {
                     let prev_tray = self.setting_show_tray_icon;
-                    let mut settings_state = SettingsViewState {
-                        max_concurrent: &mut self.setting_max_concurrent,
-                        global_speed_kb: &mut self.setting_global_speed_kb,
-                        default_connections: &mut self.setting_default_connections,
-                        default_save_dir: &mut self.setting_default_save_dir,
-                        proxy_url: &mut self.setting_proxy_url,
-                        clipboard_monitor: &mut self.setting_clipboard_monitor,
-                        notifications_enabled: &mut self.setting_notifications_enabled,
-                        open_main_on_download_start: &mut self.setting_open_main_on_download_start,
-                        dont_show_complete_dialog: &mut self.setting_dont_show_complete_dialog,
-                        minimize_to_tray: &mut self.setting_minimize_to_tray,
-                        show_tray_icon: &mut self.setting_show_tray_icon,
-                        autostart: &mut self.setting_autostart,
-                        start_minimized: &mut self.setting_start_minimized,
+                    self.setting_show_tray_icon = opt_state.tray;
+                    self.setting_autostart = opt_state.startup;
+                    self.setting_start_minimized = opt_state.minstart;
+                    self.setting_minimize_to_tray = opt_state.mintray;
+                    self.setting_default_connections = opt_state.threads;
+                    self.add_connections = opt_state.threads;
+                    self.setting_global_speed_kb = match opt_state.unit {
+                        SpeedUnit::Mbps => opt_state.speed * 1024,
+                        SpeedUnit::Kbps => opt_state.speed,
                     };
-                    let outcome = render_settings_dialog(ui, pal_refresh, &mut settings_state);
+                    self.setting_default_save_dir = opt_state.folder.clone();
+                    self.clipboard_enabled.store(opt_state.clip, Ordering::Relaxed);
+                    self.setting_clipboard_monitor = opt_state.clip;
+                    self.setting_notifications_enabled = opt_state.notif;
+                    self.setting_dont_show_complete_dialog = !opt_state.cwin;
+                    self.setting_open_main_on_download_start = opt_state.openmain;
+                    self.setting_proxy_url = opt_state.proxy.clone();
 
                     if prev_tray != self.setting_show_tray_icon {
                         if self.setting_show_tray_icon {
-                            self.tray_icon = platform::build_system_tray(&self.tray_tx, ctx.clone(), ICON_RGBA, APP_TITLE);
+                            self.has_tray_icon = platform::build_system_tray(&self.tray_tx, ctx.clone(), ICON_RGBA, APP_TITLE);
                         } else {
-                            self.tray_icon = None;
+                            platform::destroy_system_tray();
+                            self.has_tray_icon = false;
                         }
                     }
 
-                    if outcome.save_and_close {
-                        self.show_settings_dialog = false;
-                        self.add_connections = self.setting_default_connections;
-                        self.clipboard_enabled.store(self.setting_clipboard_monitor, Ordering::Relaxed);
-                        let q = Arc::clone(&self.queue);
-                        let db = self.queue.db().clone();
-                        let max_c = self.setting_max_concurrent;
-                        let speed_bps = self.setting_global_speed_kb * 1024;
-                        let conns = self.setting_default_connections;
-                        let save_dir = self.setting_default_save_dir.clone();
-                        let proxy = self.setting_proxy_url.clone();
-                        let clip = self.setting_clipboard_monitor;
-                        let notify = self.setting_notifications_enabled;
-                        let open_main = self.setting_open_main_on_download_start;
-                        let dont_complete = self.setting_dont_show_complete_dialog;
-                        let min_tray = self.setting_minimize_to_tray;
-                        let show_tray = self.setting_show_tray_icon;
-                        let autostart = self.setting_autostart;
-                        let start_min = self.setting_start_minimized;
+                    let q = Arc::clone(&self.queue);
+                    let db = self.queue.db().clone();
+                    let max_c = self.setting_max_concurrent;
+                    let speed_bps = self.setting_global_speed_kb * 1024;
+                    let conns = self.setting_default_connections;
+                    let save_dir = self.setting_default_save_dir.clone();
+                    let proxy = self.setting_proxy_url.clone();
+                    let clip = self.setting_clipboard_monitor;
+                    let notify = self.setting_notifications_enabled;
+                    let open_main = self.setting_open_main_on_download_start;
+                    let dont_complete = self.setting_dont_show_complete_dialog;
+                    let min_tray = self.setting_minimize_to_tray;
+                    let show_tray = self.setting_show_tray_icon;
+                    let autostart = self.setting_autostart;
+                    let start_min = self.setting_start_minimized;
 
-                        tokio::spawn(async move {
-                            q.set_max_concurrent(max_c).await;
-                            q.set_global_speed_limit(speed_bps).await;
-                            q.set_proxy(if proxy.trim().is_empty() { None } else { Some(proxy.clone()) }).await;
-                            let _ = db.set_setting("max_concurrent_downloads", &max_c.to_string()).await;
-                            let _ = db.set_setting("global_speed_limit_bps", &speed_bps.to_string()).await;
-                            let _ = db.set_setting("default_num_segments", &conns.to_string()).await;
-                            let _ = db.set_setting("default_save_dir", &save_dir).await;
-                            let _ = db.set_setting("proxy_url", &proxy).await;
-                            let _ = db.set_setting("clipboard_monitor_enabled", if clip { "true" } else { "false" }).await;
-                            let _ = db.set_setting("notifications_enabled", if notify { "true" } else { "false" }).await;
-                            let _ = db.set_setting("open_main_on_download_start", if open_main { "true" } else { "false" }).await;
-                            let _ = db.set_setting("dont_show_complete_dialog", if dont_complete { "true" } else { "false" }).await;
-                            let _ = db.set_setting("minimize_to_tray_enabled", if min_tray { "true" } else { "false" }).await;
-                            let _ = db.set_setting("show_tray_icon_enabled", if show_tray { "true" } else { "false" }).await;
-                            let _ = db.set_setting("start_minimized_enabled", if start_min { "true" } else { "false" }).await;
-                        });
-                        platform::set_autostart_enabled(autostart, start_min);
-                    }
-                });
+                    tokio::spawn(async move {
+                        q.set_max_concurrent(max_c).await;
+                        q.set_global_speed_limit(speed_bps).await;
+                        q.set_proxy(if proxy.trim().is_empty() { None } else { Some(proxy.clone()) }).await;
+                        let _ = db.set_setting("max_concurrent_downloads", &max_c.to_string()).await;
+                        let _ = db.set_setting("global_speed_limit_bps", &speed_bps.to_string()).await;
+                        let _ = db.set_setting("default_num_segments", &conns.to_string()).await;
+                        let _ = db.set_setting("default_save_dir", &save_dir).await;
+                        let _ = db.set_setting("proxy_url", &proxy).await;
+                        let _ = db.set_setting("clipboard_monitor_enabled", if clip { "true" } else { "false" }).await;
+                        let _ = db.set_setting("notifications_enabled", if notify { "true" } else { "false" }).await;
+                        let _ = db.set_setting("open_main_on_download_start", if open_main { "true" } else { "false" }).await;
+                        let _ = db.set_setting("dont_show_complete_dialog", if dont_complete { "true" } else { "false" }).await;
+                        let _ = db.set_setting("minimize_to_tray_enabled", if min_tray { "true" } else { "false" }).await;
+                        let _ = db.set_setting("show_tray_icon_enabled", if show_tray { "true" } else { "false" }).await;
+                        let _ = db.set_setting("start_minimized_enabled", if start_min { "true" } else { "false" }).await;
+                    });
+                    platform::set_autostart_enabled(autostart, start_min);
+                }
+            }
+
+            if close_dialog {
+                self.show_settings_dialog = false;
+                self.options_dialog_state = None;
+            }
         }
 
-        // Render open download windows (IDM-style unified window, Foreground order, always on top)
-        let any_dialog_open = self.download_windows.iter().any(|w| w.is_open);
-        if any_dialog_open {
-            let screen_rect = ctx.screen_rect();
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dl_modal_backdrop")))
-                .rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(110));
-        }
-
+        // Render open download windows (IDM-style unified detached window, Foreground order, always on top)
+        // Always render as a real, detached viewport window (with minimize & close buttons)
+        // whether the main dashboard is open or minimized.
         let mut child_outcomes: Vec<(String, DownloadWindowOutcome)> = Vec::new();
         for idx in 0..self.download_windows.len() {
             if self.download_windows[idx].is_open {
                 let dialog_id = self.download_windows[idx].dialog_id.clone();
-                let cascade_offset = (idx as f32) * 24.0;
-                platform::log_daemon(&format!("STEP: dialog shown on main window modal: idx={}, dialog_id='{}'", idx, dialog_id));
-                let outcome = render_download_window_modal(
-                    ctx,
-                    &pal_refresh,
-                    self.logo_texture.as_ref(),
-                    &mut self.download_windows[idx],
-                    cascade_offset,
-                );
-                child_outcomes.push((dialog_id, outcome));
+                let vp_id = egui::ViewportId::from_hash_of(format!("dl_window_{}", dialog_id));
+                let mut vp_builder = egui::ViewportBuilder::default()
+                    .with_title(DOWNLOAD_FILE_INFO_TITLE)
+                    .with_inner_size(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    ))
+                    .with_min_inner_size(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    ))
+                    .with_max_inner_size(Vec2::new(
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_WIDTH,
+                        crate::dialogs::download_window::DOWNLOAD_WINDOW_HEIGHT,
+                    ))
+                    .with_transparent(false)
+                    .with_resizable(false)
+                    .with_decorations(false)
+                    .with_minimize_button(true)
+                    .with_close_button(true)
+                    .with_taskbar(true)
+                    .with_always_on_top();
+
+                if let Some(pos) = self.download_windows[idx].window_pos {
+                    vp_builder = vp_builder.with_position(pos);
+                }
+
+                let mut child_outcome = DownloadWindowOutcome::None;
+                platform::log_daemon(&format!("STEP: dialog shown on child viewport (main open): idx={}, dialog_id='{}'", idx, dialog_id));
+                ctx.show_viewport_immediate(vp_id, vp_builder, |child_ctx, _class| {
+                    let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        render_download_window_content(
+                            child_ctx,
+                            &pal_refresh,
+                            self.logo_texture.as_ref(),
+                            &mut self.download_windows[idx],
+                        )
+                    }));
+                    match render_result {
+                        Ok(out) => {
+                            child_outcome = out;
+                        }
+                        Err(err) => {
+                            platform::log_daemon(&format!("ERROR: Panic rendering child viewport idx={}: {:?}", idx, err));
+                            egui::CentralPanel::default()
+                                .frame(egui::Frame::none().fill(pal_refresh.surface).inner_margin(Margin::same(24.0)))
+                                .show(child_ctx, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.add_space(50.0);
+                                        ui.heading("Couldn't open the download window");
+                                        ui.add_space(16.0);
+                                        ui.label("An error occurred while preparing this download dialog.");
+                                        ui.add_space(24.0);
+                                        if ui.button("Close").clicked() {
+                                            child_outcome = DownloadWindowOutcome::Close;
+                                        }
+                                    });
+                                });
+                        }
+                    }
+                });
+                child_outcomes.push((dialog_id, child_outcome));
             }
         }
         for (did, out) in child_outcomes {

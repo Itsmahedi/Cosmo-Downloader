@@ -1,29 +1,31 @@
-# Cosmo Downloader v1.2.5
+# Cosmo Downloader v1.2.6
 
 A fast, reliable multi-segment download manager for **Windows 10 and Windows 11**, paired with redesigned browser extensions for Google Chrome, Microsoft Edge, Brave, Opera, and Mozilla Firefox.
 
 ---
 
-## What's New in v1.2.5
+## What's New in v1.2.6
 
-### 🚀 Standalone Portability & Toolchain Dependency Fix
-- **Static Linking of `libunwind`**:
-  - Resolved startup crash on target PCs where the application failed with `"The code execution cannot proceed because libunwind.dll was not found."`
-  - Configured workspace cargo target flags (`-C target-feature=+crt-static`) so that `CosmoDownloader.exe`, `cosmodownloader-cli.exe`, and `cosmodownloader-host.exe` statically embed the C runtime and LLVM unwinder.
-  - Zero dependencies on external toolchain DLLs (`libunwind.dll`, `libc++.dll`, `libwinpthread-1.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`).
-- **Dual-Safeguard Distribution**:
-  - Bundled `libunwind.dll` into the installer and portable packages as an extra safety fallback.
+### 🎬 Video Player & Mini-Preview Fixes
+- **Strict Video Targeting**: Fixed download button injection on YouTube and streaming sites so it appears strictly on active main players (`#movie_player` and active Shorts). Buttons are completely prevented from showing on video thumbnails, mini players, or recommendation feeds.
+- **Subsequent Downloads Debounce**: Solved rapid consecutive download race conditions, allowing instant subsequent downloads without getting blocked.
+- **Lenient Size Fallback**: Improved format parsing and size resolution for streaming videos.
 
-### 🎯 Download Info Popup Dialog Behavior Fixes
-- **Independent Window Management**:
-  - Closing the "Download File Info" popup dialog (via **Cancel**) closes only the dialog. The main window state remains unchanged (stays hidden in tray or closed if it was closed).
-  - Pressing **Start download** begins the transfer and closes the dialog without opening or stealing focus from the main window.
-- **System Tray Notification**:
-  - Displays a clean Windows notification (`"Download started: <file name>"`) when a download starts in the background.
-- **New User Preference**:
-  - Added setting in the Settings dialog: *"Open the main window when a download starts"* (default: **OFF**).
-- **Add URL Dialog Stability**:
-  - Opening the download dialog from the main window's "+ Add URL" button retains the main window's exact size and position upon closing.
+### 🔌 Real-Time Extension Probing & 1-Click Launch
+- **App Lifecycle Health Probing**: Extension dynamically polls internal loopback `/health` to immediately detect when Cosmo Downloader starts or stops.
+- **3-State Connection Status**: Extension popup clearly displays whether Cosmo Downloader is Connected (green), Closed (orange), or Host Missing (red).
+- **1-Click Launch**: If the application is closed, clicking the status banner instantly launches Cosmo Downloader via the native messaging host.
+
+### 🎨 Modernized Desktop GUI & Category HUD
+- **Interactive Category Filter Pills**: Instant filtering by file type (All, Video, Audio, Documents, Compressed, Programs, Others) with live item count badges.
+- **Direct File & Folder Actions**: One-click "Open File" and "Open Folder" action buttons on completed downloads.
+- **Segmented Visual Progress Bars**: Real-time multi-threaded segment progress visualization.
+- **Live Speed HUD**: Aggregate download speed indicator in toolbar and tray.
+- **Vector Icons**: Replaced raster assets with sharp, scalable vector icons rendered directly with `egui::Painter`.
+
+### 🪟 Foreground Activation & Windows Platform Fixes
+- **Reliable Topmost Raising**: Ensured the download info dialog raises reliably above browsers (`BringWindowToTop`, `SetForegroundWindow`, `AttachThreadInput`).
+- **Unicode Sanitization**: Enhanced disk path resolution and sanitization for Unicode filenames.
 
 ---
 
@@ -31,17 +33,17 @@ A fast, reliable multi-segment download manager for **Windows 10 and Windows 11*
 
 | File | Description |
 | :--- | :--- |
-| `CosmoDownloader-Setup-v1.2.5.exe` | **Windows Installer (Recommended)** — Installs Cosmo Downloader (`v1.2.5`), desktop/start shortcuts, `yt-dlp` / `ffmpeg`, and registers browser native messaging hosts. Seamlessly upgrades existing installations. |
-| `CosmoDownloader.exe` | Standalone Windows desktop application binary (`v1.2.5`). |
-| `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.5.zip` | **All-in-One** unified browser extension package for Google Chrome, Microsoft Edge, Brave, and Opera (`v1.2.5`). |
+| `CosmoDownloader-Setup-v1.2.6.exe` | **Windows Installer (Recommended)** — Installs Cosmo Downloader (`v1.2.6`), desktop/start shortcuts, `yt-dlp` / `ffmpeg`, and registers browser native messaging hosts. Seamlessly upgrades existing installations. |
+| `CosmoDownloader.exe` | Standalone Windows desktop application binary (`v1.2.6`). |
+| `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.6.zip` | **All-in-One** unified browser extension package for Google Chrome, Microsoft Edge, Brave, and Opera (`v1.2.6`). |
 
 ---
 
 ## Quick Install (Windows)
 
-1. Download and run **`CosmoDownloader-Setup-v1.2.5.exe`**.
+1. Download and run **`CosmoDownloader-Setup-v1.2.6.exe`**.
 2. **Chrome / Microsoft Edge / Brave / Opera:**
-   - Extract **`CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.5.zip`**.
+   - Extract **`CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.6.zip`**.
    - Open your browser's extensions management page (`chrome://extensions`, `edge://extensions`, `brave://extensions`, `opera://extensions`).
    - Enable **Developer mode** (top-right toggle).
    - Click **Load unpacked** and select the extracted extension folder.

@@ -27,6 +27,13 @@ pub fn render_m3_progress_bar(
         colors::ACCENT
     };
 
+    let anim_id = ui.id().with("m3_prog_ratio");
+    let smooth_ratio = if status == "downloading" {
+        ui.ctx().animate_value_with_time(anim_id, ratio.clamp(0.0, 1.0), 0.25)
+    } else {
+        ratio.clamp(0.0, 1.0)
+    };
+
     if let Some(prog) = progress {
         if !prog.segments.is_empty() && prog.segments.len() > 1 && status != "completed" {
             let num_segs = prog.segments.len() as f32;
@@ -36,7 +43,13 @@ pub fn render_m3_progress_bar(
             for (i, seg) in prog.segments.iter().enumerate() {
                 let seg_x = rect.left() + (i as f32) * (seg_w + gap);
                 let seg_pct = (seg.progress_percent() / 100.0) as f32;
-                let active_w = (seg_w * seg_pct).clamp(0.0, seg_w);
+                let seg_anim_id = ui.id().with(("m3_seg_pct", i));
+                let smooth_seg = if status == "downloading" {
+                    ui.ctx().animate_value_with_time(seg_anim_id, seg_pct.clamp(0.0, 1.0), 0.25)
+                } else {
+                    seg_pct.clamp(0.0, 1.0)
+                };
+                let active_w = (seg_w * smooth_seg).clamp(0.0, seg_w);
 
                 if active_w > 0.0 {
                     let seg_rect = Rect::from_min_size(
@@ -50,7 +63,7 @@ pub fn render_m3_progress_bar(
         }
     }
 
-    let fill_w = (total_width * ratio.clamp(0.0, 1.0)).max(if ratio > 0.0 { 2.0 } else { 0.0 });
+    let fill_w = (total_width * smooth_ratio).max(if smooth_ratio > 0.0 { 2.0 } else { 0.0 });
     let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, bar_height));
     ui.painter().rect_filled(fill_rect, Rounding::same(2.0), fill_color);
 }

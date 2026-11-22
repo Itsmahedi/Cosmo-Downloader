@@ -56,3 +56,20 @@ yarn-error.log*
 .playwright-mcp/
 .stylelintcache
 
+# Large skill visual assets
+.agent/skills/**/visuals/
+
+# Code signing certificates, secrets, and private keys
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.snk
+secrets/
+certs/
+*.clientcert.pem
+*.trustedsigning.json
+
+

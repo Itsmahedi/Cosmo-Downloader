@@ -32,7 +32,7 @@ const INTERCEPT_MIMES = new Set([
   "audio/mpeg", "audio/flac", "audio/wav", "audio/ogg", "application/x-bittorrent"
 ]);
 
-const HOST_NAMES = ["com.cosmodownloader.downloader", "com.rustget.downloader"];
+const HOST_NAMES = ["com.cosmodownloader.downloader"];
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 
@@ -90,12 +90,12 @@ function markUrlSent(url) {
   }
 }
 
-function isUrlRecentlySent(url) {
+function isUrlRecentlySent(url, maxAgeMs = 5000) {
   if (!url) return false;
   const clean = String(url).trim();
   const now = Date.now();
   const ts = sentUrls.get(clean);
-  if (ts && (now - ts) < 5000) {
+  if (ts && (now - ts) < maxAgeMs) {
     return true;
   }
   return false;
@@ -148,23 +148,30 @@ function setBadgeError(msg) {
   }
 }
 
+let activeBridgePort = 42424;
+const CANDIDATE_PORTS = [42424, 24242, 18765];
+
 async function probeAppHealth() {
-  for (const host of ["127.0.0.1", "localhost"]) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1200);
-      const resp = await fetch(`http://${host}:42424/health`, {
-        method: "GET",
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && data.status === "ok") {
-          return true;
+  const ports = [activeBridgePort, ...CANDIDATE_PORTS.filter((p) => p !== activeBridgePort)];
+  for (const port of ports) {
+    for (const host of ["127.0.0.1", "localhost"]) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 600);
+        const resp = await fetch(`http://${host}:${port}/health`, {
+          method: "GET",
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.status === "ok") {
+            activeBridgePort = port;
+            return true;
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
   return false;
 }
@@ -302,32 +309,41 @@ async function deliverToCosmo(data) {
     cookies: cookieHeader || null,
     referer: referer || null,
     user_agent: userAgent || null,
+    quality: data.quality || null,
+    size: data.size || null,
+    size_formatted: data.size_formatted || data.sizeFormatted || null,
+    is_approx: data.is_approx ?? data.isApprox ?? null,
+    format_id: data.format_id || data.formatId || null,
   };
 
-  // 1. Try running Cosmo Downloader desktop bridge first
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
-    const resp = await fetch("http://127.0.0.1:42424/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(bridgePayload),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
+  // 1. Try running Cosmo Downloader desktop bridge first across active & candidate ports
+  const ports = [activeBridgePort, ...CANDIDATE_PORTS.filter((p) => p !== activeBridgePort)];
+  for (const port of ports) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1200);
+      const resp = await fetch(`http://127.0.0.1:${port}/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bridgePayload),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
 
-    const res = await resp.json().catch(() => null);
-    if (resp.ok && res && res.success) {
-      interceptedCount++;
-      setBadgeError("");
-      return { success: true };
+      const res = await resp.json().catch(() => null);
+      if (resp.ok && res && res.success) {
+        activeBridgePort = port;
+        interceptedCount++;
+        setBadgeError("");
+        return { success: true };
+      }
+      if (res && res.error) {
+        setBadgeError(res.error);
+        return { success: false, error: res.error };
+      }
+    } catch (_) {
+      // Continue to next port or native host fallback
     }
-    if (res && res.error) {
-      setBadgeError(res.error);
-      return { success: false, error: res.error };
-    }
-  } catch (_) {
-    // Desktop app is likely closed or unreachable; fall back to native messaging host.
   }
 
   // 2. Fallback via Native Messaging Host (launches popup or writes to DB queue)
@@ -338,6 +354,11 @@ async function deliverToCosmo(data) {
     cookies: cookieHeader || null,
     referrer: referer || null,
     user_agent: userAgent || null,
+    quality: data.quality || null,
+    size: data.size || null,
+    size_formatted: data.size_formatted || data.sizeFormatted || null,
+    is_approx: data.is_approx ?? data.isApprox ?? null,
+    format_id: data.format_id || data.formatId || null,
   });
 
   if (nativeRes && nativeRes.success) {
@@ -418,30 +439,55 @@ function isDuplicateRecentUrl(url) {
   return prev !== undefined && (now - prev) < 400;
 }
 
-chrome.downloads.onCreated.addListener((downloadItem) => {
-  if (!interceptEnabled) return;
-  if (downloadItem.byExtensionId && downloadItem.byExtensionId === chrome.runtime.id) return;
+// --- Download Interception ---
+if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+  // Chromium browsers (Chrome, Edge, Brave, Opera):
+  // Using onDeterminingFilename is critical: it pauses the download pipeline
+  // BEFORE the browser creates or displays the native "Save As" / file picker dialog.
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    if (!interceptEnabled) {
+      suggest();
+      return;
+    }
+    if (downloadItem.byExtensionId && downloadItem.byExtensionId === chrome.runtime.id) {
+      suggest();
+      return;
+    }
 
-  const url = downloadItem.url || "";
-  const referrer = downloadItem.referrer || "";
-  const ytId = extractYouTubeId(url) || extractYouTubeId(referrer);
-  if (isUrlRecentlySent(url) || isUrlRecentlySent(referrer) || (ytId && isUrlRecentlySent("youtube:" + ytId))) {
-    console.log("[CosmoDownloader] Suppressing browser download event for recently sent URL/referrer:", url, referrer);
-    return;
-  }
-  if (!shouldIntercept(downloadItem)) return;
-  if (isDuplicateRecentUrl(url)) return;
-  markUrlSent(url);
-  if (referrer) markUrlSent(referrer);
-  if (ytId) markUrlSent("youtube:" + ytId);
-
-  // Pause browser download while handing off so browser fallback stays intact on failure.
-  chrome.downloads.pause(downloadItem.id, () => {
-    const _pauseErr = chrome.runtime.lastError;
+    const url = downloadItem.url || "";
+    const referrer = downloadItem.referrer || "";
     const filename = downloadItem.filename
       ? downloadItem.filename.split(/[\\/]/).pop()
       : url.split("/").pop()?.split("?")[0] || "download";
 
+    const ytId = extractYouTubeId(url) || extractYouTubeId(referrer);
+    if (isUrlRecentlySent(url) || isUrlRecentlySent(referrer) || (ytId && isUrlRecentlySent("youtube:" + ytId))) {
+      console.log("[CosmoDownloader] Suppressing duplicate browser download for:", url);
+      chrome.downloads.cancel(downloadItem.id, () => {
+        const _ = chrome.runtime.lastError;
+        chrome.downloads.erase({ id: downloadItem.id }, () => {});
+      });
+      suggest({ filename, conflictAction: "overwrite" });
+      return;
+    }
+
+    if (!shouldIntercept(downloadItem) || isDuplicateRecentUrl(url)) {
+      suggest();
+      return;
+    }
+
+    markUrlSent(url);
+    if (referrer) markUrlSent(referrer);
+    if (ytId) markUrlSent("youtube:" + ytId);
+
+    // Cancel browser download immediately and suppress Save As popup by providing a concrete filename
+    chrome.downloads.cancel(downloadItem.id, () => {
+      const _ = chrome.runtime.lastError;
+      chrome.downloads.erase({ id: downloadItem.id }, () => {});
+    });
+    suggest({ filename, conflictAction: "overwrite" });
+
+    // Deliver to Cosmo Downloader
     deliverToCosmo({
       action: "download",
       url,
@@ -450,24 +496,69 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
       mime: downloadItem.mime || "",
       referrer: downloadItem.referrer || "",
     }).then((res) => {
-      if (res && res.success) {
-        chrome.downloads.cancel(downloadItem.id, () => {
-          const _cancelErr = chrome.runtime.lastError;
-          chrome.downloads.erase({ id: downloadItem.id }, () => {
-            const _eraseErr = chrome.runtime.lastError;
-          });
-        });
-      } else {
-        // Fallback: let the browser download continue
-        chrome.downloads.resume(downloadItem.id, () => {
-          const _resumeErr = chrome.runtime.lastError;
+      if (!res || !res.success) {
+        console.warn("[CosmoDownloader] Handoff failed, restarting browser download:", res?.error);
+        chrome.downloads.download({
+          url,
+          filename,
+          saveAs: true,
         });
       }
-    }).catch(() => {
-      chrome.downloads.resume(downloadItem.id, () => {});
+    }).catch((err) => {
+      console.error("[CosmoDownloader] Delivery error:", err);
     });
   });
-});
+} else if (chrome.downloads && chrome.downloads.onCreated) {
+  // Legacy / Firefox fallback (Firefox does not support onDeterminingFilename)
+  chrome.downloads.onCreated.addListener((downloadItem) => {
+    if (!interceptEnabled) return;
+    if (downloadItem.byExtensionId && downloadItem.byExtensionId === chrome.runtime.id) return;
+
+    const url = downloadItem.url || "";
+    const referrer = downloadItem.referrer || "";
+    const ytId = extractYouTubeId(url) || extractYouTubeId(referrer);
+    if (isUrlRecentlySent(url) || isUrlRecentlySent(referrer) || (ytId && isUrlRecentlySent("youtube:" + ytId))) {
+      console.log("[CosmoDownloader] Suppressing browser download event for recently sent URL/referrer:", url, referrer);
+      return;
+    }
+    if (!shouldIntercept(downloadItem)) return;
+    if (isDuplicateRecentUrl(url)) return;
+    markUrlSent(url);
+    if (referrer) markUrlSent(referrer);
+    if (ytId) markUrlSent("youtube:" + ytId);
+
+    // Pause browser download while handing off so browser fallback stays intact on failure.
+    chrome.downloads.pause(downloadItem.id, () => {
+      const _pauseErr = chrome.runtime.lastError;
+      const filename = downloadItem.filename
+        ? downloadItem.filename.split(/[\\/]/).pop()
+        : url.split("/").pop()?.split("?")[0] || "download";
+
+      deliverToCosmo({
+        action: "download",
+        url,
+        filename,
+        fileSize: downloadItem.fileSize || downloadItem.totalBytes || -1,
+        mime: downloadItem.mime || "",
+        referrer: downloadItem.referrer || "",
+      }).then((res) => {
+        if (res && res.success) {
+          chrome.downloads.cancel(downloadItem.id, () => {
+            const _cancelErr = chrome.runtime.lastError;
+            chrome.downloads.erase({ id: downloadItem.id }, () => {});
+          });
+        } else {
+          // Fallback: let the browser download continue
+          chrome.downloads.resume(downloadItem.id, () => {
+            const _resumeErr = chrome.runtime.lastError;
+          });
+        }
+      }).catch(() => {
+        chrome.downloads.resume(downloadItem.id, () => {});
+      });
+    });
+  });
+}
 
 // --- Context Menus ---
 chrome.runtime.onInstalled.addListener(() => {
@@ -505,22 +596,68 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
+async function fetchVideoFormats(url) {
+  const ports = [activeBridgePort, ...CANDIDATE_PORTS.filter((p) => p !== activeBridgePort)];
+  for (const port of ports) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const resp = await fetch(`http://127.0.0.1:${port}/formats?url=${encodeURIComponent(url)}`, {
+        method: "GET",
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (resp.ok) {
+        const data = await resp.json().catch(() => null);
+        if (data && data.success && data.formats) {
+          activeBridgePort = port;
+          return { success: true, formats: data.formats };
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Fallback: Native Messaging Host
+  try {
+    const hostRes = await sendViaNativeHost({ action: "formats", url }, 8000);
+    if (hostRes && hostRes.success && hostRes.formats) {
+      return { success: true, formats: hostRes.formats };
+    }
+    if (hostRes && hostRes.error) {
+      return { success: false, error: hostRes.error };
+    }
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+
+  return { success: false, error: "Cosmo Downloader bridge or host unreachable" };
+}
+
 // --- Messages ---
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.action) {
     case "getStatus":
       (async () => {
-        let appRunning = await probeAppHealth();
-        if (!nativePort) {
+        let appRunning = false;
+        if (!nativePort || !isConnected) {
           connectNativeHost();
         }
-        if (!appRunning && nativePort) {
+        if (nativePort && isConnected) {
           try {
-            const hostStatus = await sendViaNativeHost({ action: "status" }, 1200);
+            const hostStatus = await sendViaNativeHost({ action: "status" }, 1000);
             if (hostStatus && hostStatus.success && hostStatus.app_running) {
               appRunning = true;
+              if (typeof hostStatus.message === "string") {
+                const match = hostStatus.message.match(/port\s+(\d+)/i);
+                if (match && match[1]) {
+                  activeBridgePort = parseInt(match[1], 10);
+                }
+              }
             }
           } catch (_) {}
+        }
+        if (!appRunning) {
+          appRunning = await probeAppHealth();
         }
         const hostInstalled = isConnected && nativePort !== null;
         sendResponse({
@@ -604,6 +741,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true });
       break;
 
+    case "download":
+    case "downloadLink":
+      if (message.url) {
+        markUrlSent(message.url);
+        deliverToCosmo({
+          action: "download",
+          url: message.url,
+          filename: message.filename || "",
+          referrer: message.referrer || message.pageUrl || "",
+        }).then((res) => sendResponse(res))
+          .catch((err) => sendResponse({ success: false, error: String(err) }));
+        return true;
+      }
+      sendResponse({ success: false, error: "Empty URL" });
+      break;
+
     case "addUrl":
       if (message.url) {
         const filename = message.url.split("/").pop()?.split("?")[0] || "download";
@@ -618,11 +771,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: false, error: "Empty URL" });
       break;
 
+    case "getVideoFormats":
+    case "getFormats":
+      if (message.url) {
+        fetchVideoFormats(message.url)
+          .then((res) => sendResponse(res))
+          .catch((err) => sendResponse({ success: false, error: String(err) }));
+        return true;
+      }
+      sendResponse({ success: false, error: "Empty URL" });
+      break;
+
     case "downloadVideo":
       if (message.url) {
-        const dedupeKey = (message.url || "") + "::" + (message.quality || message.filename || "");
-        if (isUrlRecentlySent(dedupeKey)) {
-          console.log("[CosmoDownloader] Suppressing duplicate rapid-fire downloadVideo message for:", dedupeKey);
+        const dedupeKey = (message.url || "") + "::" + (message.quality || message.format_id || message.filename || "");
+        if (isUrlRecentlySent(dedupeKey, 400)) {
+          console.log("[CosmoDownloader] Suppressing accidental rapid-fire double click for:", dedupeKey);
           sendResponse({ success: true, deduplicated: true });
           return true;
         }
@@ -640,6 +804,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           url: message.url,
           filename: message.filename || "",
           referrer: message.pageUrl || "",
+          quality: message.quality || null,
+          size: message.size || null,
+          size_formatted: message.size_formatted || message.sizeFormatted || null,
+          is_approx: message.is_approx ?? message.isApprox ?? null,
+          format_id: message.format_id || message.formatId || null,
         }).then((res) => sendResponse(res))
           .catch((err) => sendResponse({ success: false, error: String(err) }));
         return true;

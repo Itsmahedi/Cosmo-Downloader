@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{HeaderMap, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE};
 use reqwest::Client;
@@ -67,7 +68,10 @@ pub struct FileInfo {
 
 /// Probes a remote URL using HEAD (with fallback to Range GET) to determine file characteristics.
 pub async fn probe_url(client: &Client, url: &Url, custom_headers: &HeaderMap) -> Result<FileInfo> {
-    debug!("Probing URL via HEAD: {}", redact_url_for_log(url.as_str()));
+    let start = std::time::Instant::now();
+    let redacted_url = redact_url_for_log(url.as_str());
+    crate::log_event(&format!("PROBE: start url='{}'", redacted_url));
+    debug!("Probing URL via HEAD: {}", redacted_url);
 
     let head_result = client
         .head(url.clone())
@@ -75,7 +79,7 @@ pub async fn probe_url(client: &Client, url: &Url, custom_headers: &HeaderMap) -
         .send()
         .await;
 
-    match head_result {
+    let res = match head_result {
         Ok(resp) if resp.status().is_success() => {
             let final_url = resp.url().clone();
             let headers = resp.headers();
@@ -131,7 +135,25 @@ pub async fn probe_url(client: &Client, url: &Url, custom_headers: &HeaderMap) -
             debug!("HEAD request error ({:?}), falling back to Range GET", e);
             probe_via_range_get(client, url, custom_headers).await
         }
+    };
+
+    match &res {
+        Ok(info) => crate::log_event(&format!(
+            "PROBE: completed in {:.2}ms for url='{}': filename='{}' size={:?}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            redacted_url,
+            info.suggested_filename,
+            info.content_length
+        )),
+        Err(e) => crate::log_event(&format!(
+            "PROBE: failed in {:.2}ms for url='{}': error={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            redacted_url,
+            e
+        )),
     }
+
+    res
 }
 
 /// Fallback probe using GET with Range: bytes=0-0 to test both range support and content length.
@@ -564,6 +586,33 @@ pub fn sanitize_filename(name: &str) -> String {
     safe.chars().take(180).collect()
 }
 
+/// If the target file already exists in the destination directory, appends " (1)", " (2)", etc.
+/// so the existing file is never overwritten. Returns the unique path and filename.
+pub fn resolve_unique_path(save_dir: &Path, filename: &str) -> (PathBuf, String) {
+    let sanitized = sanitize_filename(filename);
+    let (stem, ext) = if let Some(dot_idx) = sanitized.rfind('.') {
+        if dot_idx > 0 {
+            (&sanitized[..dot_idx], &sanitized[dot_idx..])
+        } else {
+            (sanitized.as_str(), "")
+        }
+    } else {
+        (sanitized.as_str(), "")
+    };
+
+    let mut candidate_name = sanitized.clone();
+    let mut candidate_path = save_dir.join(&candidate_name);
+    let mut counter = 1;
+
+    while candidate_path.exists() {
+        candidate_name = format!("{} ({}){}", stem, counter, ext);
+        candidate_path = save_dir.join(&candidate_name);
+        counter += 1;
+    }
+
+    (candidate_path, candidate_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,5 +715,21 @@ mod tests {
         assert_eq!(mime_to_extension(Some("application/pdf")), "pdf");
         assert_eq!(mime_to_extension(Some("application/zip")), "zip");
         assert_eq!(mime_to_extension(None), "bin");
+    }
+
+    #[test]
+    fn test_resolve_unique_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let p1 = temp.path().join("video.mp4");
+        std::fs::write(&p1, b"original").unwrap();
+
+        let (unique_p, unique_name) = resolve_unique_path(temp.path(), "video.mp4");
+        assert_eq!(unique_name, "video (1).mp4");
+        assert_eq!(unique_p, temp.path().join("video (1).mp4"));
+
+        std::fs::write(&unique_p, b"copy 1").unwrap();
+        let (unique_p2, unique_name2) = resolve_unique_path(temp.path(), "video.mp4");
+        assert_eq!(unique_name2, "video (2).mp4");
+        assert_eq!(unique_p2, temp.path().join("video (2).mp4"));
     }
 }

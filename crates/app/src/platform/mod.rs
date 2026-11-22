@@ -3,30 +3,16 @@ pub mod windows;
 #[cfg(not(windows))]
 pub mod unix;
 pub mod tray;
+pub mod logger;
+pub mod watchdog;
 
 #[cfg(windows)]
 pub use windows::*;
 #[cfg(not(windows))]
 pub use unix::*;
 pub use tray::*;
-
-pub fn log_daemon(msg: &str) {
-    let log_dir = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .map(|base| base.join("CosmoDownloader").join("CosmoDownloader").join("logs"))
-        .unwrap_or_else(|| std::env::temp_dir().join("CosmoDownloader_logs"));
-    let _ = std::fs::create_dir_all(&log_dir);
-    let log_file = log_dir.join("cosmodownloader.log");
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-    let thread_id = std::thread::current().id();
-    let line = format!("[{}][{:?}] {}\n", timestamp, thread_id, msg);
-    eprint!("{}", line);
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-}
+pub use logger::*;
+pub use watchdog::*;
 
 pub fn get_autostart_info() -> (bool, bool) {
     #[cfg(windows)]
@@ -153,6 +139,30 @@ pub fn ensure_native_host_registered() {
                     .creation_flags(windows::CREATE_NO_WINDOW)
                     .status();
             }
+        }
+    });
+}
+
+pub fn register_torrent_and_magnet_associations() {
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_str = exe.to_string_lossy();
+            let cmd = format!("\"{}\" \"%1\"", exe_str);
+            let icon = format!("\"{}\",0", exe_str);
+
+            // .torrent file association
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\.torrent", "/ve", "/t", "REG_SZ", "/d", "CosmoDownloader.Torrent", "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\.torrent\\OpenWithProgids", "/v", "CosmoDownloader.Torrent", "/t", "REG_SZ", "/d", "", "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\CosmoDownloader.Torrent", "/ve", "/t", "REG_SZ", "/d", "BitTorrent File", "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\CosmoDownloader.Torrent\\DefaultIcon", "/ve", "/t", "REG_SZ", "/d", &icon, "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\CosmoDownloader.Torrent\\shell\\open\\command", "/ve", "/t", "REG_SZ", "/d", &cmd, "/f"]);
+
+            // magnet: URL protocol
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\magnet", "/ve", "/t", "REG_SZ", "/d", "URL:BitTorrent Magnet Link", "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\magnet", "/v", "URL Protocol", "/t", "REG_SZ", "/d", "", "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\magnet\\DefaultIcon", "/ve", "/t", "REG_SZ", "/d", &icon, "/f"]);
+            let _ = run_reg_command(&["add", "HKCU\\Software\\Classes\\magnet\\shell\\open\\command", "/ve", "/t", "REG_SZ", "/d", &cmd, "/f"]);
         }
     });
 }

@@ -19,6 +19,11 @@ pub struct ExtensionDownloadRequest {
     pub referer: Option<String>,
     pub user_agent: Option<String>,
     pub num_segments: Option<usize>,
+    pub quality: Option<String>,
+    pub size: Option<u64>,
+    pub size_formatted: Option<String>,
+    pub is_approx: Option<bool>,
+    pub format_id: Option<String>,
 }
 
 /// Spawns an on-demand CosmoDownloader popup window with the given request payload.
@@ -220,23 +225,63 @@ impl BridgeServer {
 
     /// Run the server until cancellation token is triggered.
     pub async fn run(self, cancel: CancellationToken) {
-        let addr_all = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let addr_local = SocketAddr::from(([127, 0, 0, 1], self.port));
-        let listener = match TcpListener::bind(addr_all).await {
-            Ok(l) => {
-                info!("Cosmo Downloader local browser bridge listening on http://{}", addr_all);
+        use socket2::{Domain, Socket, Type};
+
+        let mut listener_opt: Option<TcpListener> = None;
+        for attempt in 0..10 {
+            let bind_socket = |addr: SocketAddr| -> std::io::Result<TcpListener> {
+                let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+                let sock = Socket::new(domain, Type::STREAM, None)?;
+                sock.set_reuse_address(true)?;
+                #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+                let _ = sock.set_reuse_port(true);
+                sock.bind(&addr.into())?;
+                sock.listen(128)?;
+                sock.set_nonblocking(true)?;
+                TcpListener::from_std(sock.into())
+            };
+
+            let ports = [self.port, 24242, 18765];
+            for &p in &ports {
+                let addr_local = SocketAddr::from(([127, 0, 0, 1], p));
+                let addr_all = SocketAddr::from(([0, 0, 0, 0], p));
+
+                if let Ok(l) = bind_socket(addr_local) {
+                    info!("Cosmo Downloader local browser bridge listening on http://{}", addr_local);
+                    listener_opt = Some(l);
+                    break;
+                }
+                if let Ok(l) = bind_socket(addr_all) {
+                    info!("Cosmo Downloader local browser bridge listening on http://{}", addr_all);
+                    listener_opt = Some(l);
+                    break;
+                }
+            }
+            if listener_opt.is_some() {
+                break;
+            }
+            if attempt < 9 {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+
+        let listener = match listener_opt {
+            Some(l) => {
+                if let Ok(local_addr) = l.local_addr() {
+                    let active_port = local_addr.port();
+                    info!("Cosmo Downloader active bridge port: {}", active_port);
+                    if let Some(base) = directories::BaseDirs::new() {
+                        let port_file = base.data_local_dir().join("CosmoDownloader").join("bridge_port.txt");
+                        let _ = std::fs::create_dir_all(port_file.parent().unwrap());
+                        let _ = std::fs::write(&port_file, active_port.to_string());
+                    }
+                }
                 l
             }
-            Err(_) => match TcpListener::bind(addr_local).await {
-                Ok(l) => {
-                    info!("Cosmo Downloader local browser bridge listening on http://{}", addr_local);
-                    l
-                }
-                Err(e) => {
-                    warn!("Failed to bind browser bridge on port {}: {}", self.port, e);
-                    return;
-                }
-            },
+            None => {
+                warn!("Failed to bind browser bridge on port {} after retries", self.port);
+                return;
+            }
         };
 
         let prompt_tx = self.prompt_tx.map(Arc::new);
@@ -361,23 +406,26 @@ impl BridgeServer {
                                     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
                                     let thread_id = std::thread::current().id();
                                     eprintln!("[{}][{:?}] STEP: extension request received via HTTP /download: url='{}'", timestamp, thread_id, dl_req.url);
-                                    if let Err(e) = crate::probe::validate_http_url(&dl_req.url) {
-                                        let err_json = serde_json::json!({
-                                            "success": false,
-                                            "error": e.to_string(),
-                                        }).to_string();
-                                        let resp = format!(
-                                            "HTTP/1.1 400 Bad Request\r\n\
-                                             {}Content-Type: application/json\r\n\
-                                             Content-Length: {}\r\n\
-                                             Connection: close\r\n\r\n{}",
-                                            cors_header,
-                                            err_json.len(),
-                                            err_json
-                                        );
-                                        let _ = socket.write_all(resp.as_bytes()).await;
-                                        let _ = socket.flush().await;
-                                        return;
+                                    let is_torrent = crate::torrent::is_torrent_url(&dl_req.url);
+                                    if !is_torrent {
+                                        if let Err(e) = crate::probe::validate_http_url(&dl_req.url) {
+                                            let err_json = serde_json::json!({
+                                                "success": false,
+                                                "error": e.to_string(),
+                                            }).to_string();
+                                            let resp = format!(
+                                                "HTTP/1.1 400 Bad Request\r\n\
+                                                 {}Content-Type: application/json\r\n\
+                                                 Content-Length: {}\r\n\
+                                                 Connection: close\r\n\r\n{}",
+                                                cors_header,
+                                                err_json.len(),
+                                                err_json
+                                            );
+                                            let _ = socket.write_all(resp.as_bytes()).await;
+                                            let _ = socket.flush().await;
+                                            return;
+                                        }
                                     }
 
                                     dl_req.filename = dl_req
@@ -387,12 +435,11 @@ impl BridgeServer {
                                         .filter(|s| !s.is_empty())
                                         .map(crate::probe::sanitize_filename);
 
-                                    if let Some(ref cb) = download_wake_cb {
-                                        cb();
-                                    }
-
                                     if let Some(ref tx) = prompt_tx {
                                         let _ = tx.send(dl_req).await;
+                                        if let Some(ref cb) = download_wake_cb {
+                                            cb();
+                                        }
                                         let json_resp = "{\"success\":true,\"message\":\"Prompted in CosmoDownloader dialog\"}";
                                         let resp = format!(
                                             "HTTP/1.1 200 OK\r\n\
@@ -414,6 +461,7 @@ impl BridgeServer {
                                         cat.default_dir().join(fname)
                                     });
 
+                                    let format_selector = dl_req.format_id.clone().or_else(|| dl_req.quality.clone());
                                     let options = DownloadOptions {
                                         url: dl_req.url.clone(),
                                         output_path,
@@ -421,6 +469,7 @@ impl BridgeServer {
                                         cookie: dl_req.cookies,
                                         referer: dl_req.referer,
                                         user_agent: dl_req.user_agent,
+                                        custom_headers: format_selector,
                                         ..Default::default()
                                     };
 
@@ -470,6 +519,102 @@ impl BridgeServer {
                                         err_resp
                                     );
                                     let _ = socket.write_all(resp.as_bytes()).await;
+                                }
+                            }
+                        } else if req.starts_with("POST /formats") || req.starts_with("POST /api/formats")
+                            || req.starts_with("GET /formats") || req.starts_with("GET /api/formats")
+                        {
+                            let mut target_url = String::new();
+                            if req.starts_with("GET ") {
+                                if let Some(first_line) = req.lines().next() {
+                                    if let Some(path) = first_line.split_whitespace().nth(1) {
+                                        if let Some((_, query)) = path.split_once('?') {
+                                            for pair in query.split('&') {
+                                                if let Some((k, v)) = pair.split_once('=') {
+                                                    if k == "url" {
+                                                        if let Ok(decoded) = percent_encoding::percent_decode_str(v).decode_utf8() {
+                                                            target_url = decoded.to_string();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                let body = req.split("\r\n\r\n").nth(1).unwrap_or_default();
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                                    if let Some(u) = val.get("url").and_then(|v| v.as_str()) {
+                                        target_url = u.to_string();
+                                    }
+                                }
+                            }
+
+                            if target_url.trim().is_empty() {
+                                let err_json = serde_json::json!({
+                                    "success": false,
+                                    "error": "Missing 'url' parameter"
+                                }).to_string();
+                                let resp = format!(
+                                    "HTTP/1.1 400 Bad Request\r\n\
+                                     {}Content-Type: application/json\r\n\
+                                     Content-Length: {}\r\n\
+                                     Connection: close\r\n\r\n{}",
+                                    cors_header,
+                                    err_json.len(),
+                                    err_json
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.flush().await;
+                                return;
+                            }
+
+                            match crate::youtube::query_video_formats(&target_url).await {
+                                Ok(formats) => {
+                                    let resp_json = serde_json::json!({
+                                        "success": true,
+                                        "formats": formats
+                                    }).to_string();
+                                    let origin_hdr = if cors_header.is_empty() {
+                                        "Access-Control-Allow-Origin: *\r\n".to_string()
+                                    } else {
+                                        cors_header.clone()
+                                    };
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\n\
+                                         {}Access-Control-Allow-Private-Network: true\r\n\
+                                         Content-Type: application/json\r\n\
+                                         Content-Length: {}\r\n\
+                                         Connection: close\r\n\r\n{}",
+                                        origin_hdr,
+                                        resp_json.len(),
+                                        resp_json
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.flush().await;
+                                }
+                                Err(err) => {
+                                    let err_json = serde_json::json!({
+                                        "success": false,
+                                        "error": err
+                                    }).to_string();
+                                    let origin_hdr = if cors_header.is_empty() {
+                                        "Access-Control-Allow-Origin: *\r\n".to_string()
+                                    } else {
+                                        cors_header.clone()
+                                    };
+                                    let resp = format!(
+                                        "HTTP/1.1 500 Internal Server Error\r\n\
+                                         {}Access-Control-Allow-Private-Network: true\r\n\
+                                         Content-Type: application/json\r\n\
+                                         Content-Length: {}\r\n\
+                                         Connection: close\r\n\r\n{}",
+                                        origin_hdr,
+                                        err_json.len(),
+                                        err_json
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.flush().await;
                                 }
                             }
                         } else if req.starts_with("GET /health") {
@@ -548,6 +693,9 @@ impl BridgeServer {
 
                             if let Some(ref tx) = quit_tx {
                                 let _ = tx.send(()).await;
+                            }
+                            if let Some(ref cb) = wake_cb {
+                                cb();
                             }
                             let json_resp = "{\"status\":\"quitting\"}";
                             let resp = format!(

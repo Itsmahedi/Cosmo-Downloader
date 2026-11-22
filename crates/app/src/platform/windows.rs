@@ -91,13 +91,47 @@ struct ITaskbarList3Vtbl {
     add_ref: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
     release: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
     hr_init: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> i32,
-    add_tab: usize,
-    delete_tab: usize,
+    add_tab: unsafe extern "system" fn(this: *mut std::ffi::c_void, hwnd: *mut std::ffi::c_void) -> i32,
+    delete_tab: unsafe extern "system" fn(this: *mut std::ffi::c_void, hwnd: *mut std::ffi::c_void) -> i32,
     activate_tab: usize,
     set_active_alt: usize,
     mark_fullscreen_window: usize,
     set_progress_value: unsafe extern "system" fn(this: *mut std::ffi::c_void, hwnd: *mut std::ffi::c_void, ull_completed: u64, ull_total: u64) -> i32,
     set_progress_state: unsafe extern "system" fn(this: *mut std::ffi::c_void, hwnd: *mut std::ffi::c_void, tbp_flags: u32) -> i32,
+}
+
+pub fn remove_window_from_taskbar(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = CoInitializeEx(std::ptr::null_mut(), 2);
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if CoCreateInstance(&CLSID_TASKBAR_LIST, std::ptr::null_mut(), 1, &IID_ITASKBAR_LIST3, &mut ptr) == 0 && !ptr.is_null() {
+            let vtbl = *(ptr as *mut *mut ITaskbarList3Vtbl);
+            let _ = ((*vtbl).hr_init)(ptr);
+            let _ = ((*vtbl).delete_tab)(ptr, hwnd);
+            let _ = ((*vtbl).release)(ptr);
+        }
+        CoUninitialize();
+    }
+}
+
+pub fn add_window_to_taskbar(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = CoInitializeEx(std::ptr::null_mut(), 2);
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if CoCreateInstance(&CLSID_TASKBAR_LIST, std::ptr::null_mut(), 1, &IID_ITASKBAR_LIST3, &mut ptr) == 0 && !ptr.is_null() {
+            let vtbl = *(ptr as *mut *mut ITaskbarList3Vtbl);
+            let _ = ((*vtbl).hr_init)(ptr);
+            let _ = ((*vtbl).add_tab)(ptr, hwnd);
+            let _ = ((*vtbl).release)(ptr);
+        }
+        CoUninitialize();
+    }
 }
 
 pub fn update_taskbar_progress(hwnd: *mut std::ffi::c_void, flags: u32, completed: u64, total: u64) {
@@ -122,11 +156,18 @@ pub fn update_taskbar_progress(hwnd: *mut std::ffi::c_void, flags: u32, complete
 }
 
 pub fn set_taskbar_progress(flags: u32, completed: u64, total: u64) {
-    let hwnd = get_process_window();
-    update_taskbar_progress(hwnd, flags, completed, total);
+    let main_hwnd = get_main_dashboard_window();
+    if !main_hwnd.is_null() {
+        update_taskbar_progress(main_hwnd, flags, completed, total);
+    }
+    let dlg_hwnd = get_dialog_window();
+    if !dlg_hwnd.is_null() {
+        update_taskbar_progress(dlg_hwnd, flags, completed, total);
+    }
 }
 
 extern "system" {
+    pub fn AllowSetForegroundWindow(dwProcessId: u32) -> i32;
     pub fn CreateMutexA(lpMutexAttributes: *mut std::ffi::c_void, bInitialOwner: i32, lpName: *const u8) -> *mut std::ffi::c_void;
     pub fn CreateEventA(lpEventAttributes: *mut std::ffi::c_void, bManualReset: i32, bInitialState: i32, lpName: *const u8) -> *mut std::ffi::c_void;
     pub fn OpenEventA(dwDesiredAccess: u32, bInheritHandle: i32, lpName: *const u8) -> *mut std::ffi::c_void;
@@ -162,8 +203,20 @@ extern "system" {
     pub fn GetForegroundWindow() -> *mut std::ffi::c_void;
     pub fn GetCurrentThreadId() -> u32;
     pub fn AttachThreadInput(idAttach: u32, idAttachTo: u32, fAttach: i32) -> i32;
+    pub fn SetWindowTextW(hWnd: *mut std::ffi::c_void, lpString: *const u16) -> i32;
     pub fn SetFocus(hWnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     pub fn FlashWindowEx(pfwi: *const FLASHWINFO) -> i32;
+    pub fn SetLayeredWindowAttributes(hWnd: *mut std::ffi::c_void, crKey: u32, bAlpha: u8, dwFlags: u32) -> i32;
+    pub fn ReleaseCapture() -> i32;
+    pub fn SendMessageW(hWnd: *mut std::ffi::c_void, Msg: u32, wParam: usize, lParam: isize) -> isize;
+    pub fn PostMessageW(hWnd: *mut std::ffi::c_void, Msg: u32, wParam: usize, lParam: isize) -> i32;
+    pub fn IsWindow(hWnd: *mut std::ffi::c_void) -> i32;
+    pub fn InvalidateRect(hWnd: *mut std::ffi::c_void, lpRect: *const std::ffi::c_void, bErase: i32) -> i32;
+    pub fn UpdateWindow(hWnd: *mut std::ffi::c_void) -> i32;
+    pub fn WindowFromPoint(Point: POINT) -> *mut std::ffi::c_void;
+    pub fn GetAncestor(hWnd: *mut std::ffi::c_void, gaFlags: u32) -> *mut std::ffi::c_void;
+    pub fn GetAsyncKeyState(vKey: i32) -> i16;
+    pub fn GetClassNameW(hWnd: *mut std::ffi::c_void, lpClassName: *mut u16, nMaxCount: i32) -> i32;
 }
 
 #[repr(C)]
@@ -181,6 +234,7 @@ pub const FLASHW_TIMERNOFG: u32 = 0x0000000C;
 
 pub const SW_SHOWNORMAL: i32 = 1;
 pub const SW_SHOW: i32 = 5;
+pub const SW_MINIMIZE: i32 = 6;
 pub const SW_RESTORE: i32 = 9;
 
 #[repr(C)]
@@ -192,6 +246,7 @@ pub struct RECT {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct POINT {
     pub x: i32,
     pub y: i32,
@@ -257,6 +312,7 @@ pub fn init_shutdown_listener(ctx: &eframe::egui::Context) {
     if PREV_WNDPROC.load(Ordering::SeqCst) == 0 {
         let hwnd = get_process_window();
         if !hwnd.is_null() {
+            set_main_dashboard_window(hwnd);
             unsafe {
                 let prev = SetWindowLongPtrW(hwnd, -4, shutdown_wndproc as *const () as isize);
                 if prev != 0 {
@@ -346,7 +402,20 @@ pub fn get_process_window() -> *mut std::ffi::c_void {
     }
 }
 
+static MAIN_WINDOW_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn set_main_dashboard_window(hwnd: *mut std::ffi::c_void) {
+    if !hwnd.is_null() {
+        MAIN_WINDOW_HWND.store(hwnd as isize, Ordering::SeqCst);
+    }
+}
+
 pub fn get_main_dashboard_window() -> *mut std::ffi::c_void {
+    let cached = MAIN_WINDOW_HWND.load(Ordering::SeqCst);
+    if cached != 0 && unsafe { IsWindow(cached as *mut std::ffi::c_void) != 0 } {
+        return cached as *mut std::ffi::c_void;
+    }
+
     unsafe {
         let current_pid = GetCurrentProcessId();
         struct EnumData {
@@ -365,13 +434,19 @@ pub fn get_main_dashboard_window() -> *mut std::ffi::c_void {
             if wnd_pid == data.pid {
                 let style = GetWindowLongW(hwnd, -16) as u32;
                 if (style & 0x40000000) == 0 { // not WS_CHILD
-                    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                    GetWindowRect(hwnd, &mut rc);
-                    let w = rc.right - rc.left;
-                    let h = rc.bottom - rc.top;
-                    if w >= 600 && h >= 400 && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 && rc.left > -10000 && rc.top > -10000 {
-                        data.hwnd = hwnd;
-                        return 0; // stop
+                    let mut buf = [0u16; 256];
+                    let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+                    if len > 0 {
+                        let title = String::from_utf16_lossy(&buf[..len as usize]);
+                        if (title.contains("Cosmo Downloader") || title.contains("CosmoDownloader"))
+                            && !title.contains("Downloading -")
+                            && !title.contains("Download File Info")
+                            && !title.contains("Host")
+                            && !title.contains("Service")
+                        {
+                            data.hwnd = hwnd;
+                            return 0; // stop
+                        }
                     }
                 }
             }
@@ -380,17 +455,24 @@ pub fn get_main_dashboard_window() -> *mut std::ffi::c_void {
 
         EnumWindows(Some(enum_proc), &mut data as *mut _ as isize);
         if !data.hwnd.is_null() {
+            MAIN_WINDOW_HWND.store(data.hwnd as isize, Ordering::SeqCst);
             return data.hwnd;
         }
 
-        let title: Vec<u16> = "Cosmo Downloader\0".encode_utf16().collect();
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-        if !hwnd.is_null() && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 {
-            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-            GetWindowRect(hwnd, &mut rc);
-            if rc.left > -10000 && rc.top > -10000 {
+        let titles = ["Cosmo Downloader\0", "CosmoDownloader\0"];
+        for t in titles {
+            let encoded: Vec<u16> = t.encode_utf16().collect();
+            let hwnd = FindWindowW(std::ptr::null(), encoded.as_ptr());
+            if !hwnd.is_null() {
+                MAIN_WINDOW_HWND.store(hwnd as isize, Ordering::SeqCst);
                 return hwnd;
             }
+        }
+
+        let proc_wnd = get_process_window();
+        if !proc_wnd.is_null() {
+            MAIN_WINDOW_HWND.store(proc_wnd as isize, Ordering::SeqCst);
+            return proc_wnd;
         }
 
         std::ptr::null_mut()
@@ -475,59 +557,350 @@ pub fn get_dialog_window() -> *mut std::ffi::c_void {
         }
 
         EnumWindows(Some(enum_proc), &mut data as *mut _ as isize);
-        if !data.hwnd.is_null() {
-            return data.hwnd;
-        }
-
-        get_process_window()
+        data.hwnd
     }
 }
 
+pub fn drag_window_by_title(title: &str) {
+    unsafe {
+        // Only initiate dragging if the left mouse button is actively held down
+        if (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) == 0 {
+            return;
+        }
+
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        let mut target = std::ptr::null_mut();
+
+        let wnd = WindowFromPoint(pt);
+        if !wnd.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(wnd, &mut pid);
+            if pid == GetCurrentProcessId() {
+                let style = GetWindowLongW(wnd, -16) as u32;
+                if (style & 0x40000000) != 0 {
+                    let parent = GetAncestor(wnd, 1 /* GA_PARENT */);
+                    target = if !parent.is_null() { parent } else { wnd };
+                } else {
+                    target = wnd;
+                }
+            }
+        }
+
+        if target.is_null() {
+            if title.contains("Download") || title.contains("Info") {
+                target = get_dialog_window();
+            } else if title.contains("Cosmo Downloader") {
+                target = get_main_dashboard_window();
+            }
+        }
+
+        if target.is_null() {
+            target = get_process_window();
+        }
+
+        if !target.is_null() {
+            ReleaseCapture();
+            // Use WM_NCLBUTTONDOWN with HTCAPTION so Windows cleanly tracks the drag
+            // only while the button remains pressed, avoiding sticky modal mouse tracking.
+            SendMessageW(target, 0x00A1 /* WM_NCLBUTTONDOWN */, 2 /* HTCAPTION */, 0);
+        }
+    }
+}
+
+pub fn drag_window_under_cursor() {
+    drag_window_by_title("Download File Info");
+}
+
 pub fn show_download_popup_window() {
-    let hwnd = get_dialog_window();
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
+    }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
+    }
+    if !hwnd.is_null() {
+        show_download_window_hwnd(hwnd);
+    }
+}
+
+pub fn show_download_window_hwnd(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() {
+        return;
+    }
+    MAIN_WINDOW_HWND.store(hwnd as isize, Ordering::SeqCst);
+    unsafe {
+        let title: Vec<u16> = "Download File Info\0".encode_utf16().collect();
+        SetWindowTextW(hwnd, title.as_ptr());
+
+        // CRITICAL: Sever window ownership link so this dialog is a completely independent,
+        // separate top-level window. This guarantees the main dashboard is NOT forced to the
+        // front, linked, or unminimized when this dialog opens.
+        SetWindowLongPtrW(hwnd, -8 /* GWLP_HWNDPARENT */, 0);
+
+        // 1. Remove WS_EX_TOOLWINDOW & WS_EX_LAYERED, restore WS_EX_APPWINDOW
+        let ex_style = GetWindowLongW(hwnd, -20);
+        SetWindowLongPtrW(
+            hwnd,
+            -20,
+            ((ex_style & !(0x00000080 | 0x00080000)) | 0x00040000) as isize,
+        );
+        SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+
+        // 2. Always position popup window centered on active monitor with 560x350 dimensions
+        let (cx, cy) = get_dialog_center_pos(false, 560.0, 350.0);
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            cx as i32,
+            cy as i32,
+            560,
+            350,
+            0x0020 | 0x0040, // SWP_FRAMECHANGED | SWP_SHOWWINDOW
+        );
+
+        // 3. Show dialog normal / restore
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        ShowWindow(hwnd, SW_SHOW);
+
+        // 4. Break Windows foreground lock via keyboard event pulse (VK_MENU)
+        keybd_event(0x12, 0, 0, 0); // VK_MENU down
+        keybd_event(0x12, 0, 0x0002, 0); // VK_MENU up
+
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+
+        // AttachThreadInput fallback if foreground activation is constrained by OS
+        let fg_wnd = GetForegroundWindow();
+        if !fg_wnd.is_null() && fg_wnd != hwnd {
+            let mut fg_pid = 0u32;
+            let fg_thread = GetWindowThreadProcessId(fg_wnd, &mut fg_pid);
+            let cur_thread = GetCurrentThreadId();
+            if fg_thread != 0 && fg_thread != cur_thread {
+                AttachThreadInput(cur_thread, fg_thread, 1);
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                SetFocus(hwnd);
+                AttachThreadInput(cur_thread, fg_thread, 0);
+            }
+        }
+
+        let fwi = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 4,
+            dwTimeout: 0,
+        };
+        FlashWindowEx(&fwi);
+        add_window_to_taskbar(hwnd);
+        PostMessageW(hwnd, 0 /* WM_NULL */, 0, 0);
+    }
+}
+
+pub fn minimize_dialog_window() {
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
+    }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
+    }
     if !hwnd.is_null() {
         unsafe {
-            let style = GetWindowLongW(hwnd, -16) as u32;
-            let new_style = (style & !0x00C00000) | 0x00040000;
-            SetWindowLongPtrW(hwnd, -16, new_style as isize);
+            ShowWindow(hwnd, SW_MINIMIZE);
+        }
+    }
+}
 
-            // Step 2: Show dialog with WindowState = Normal, ShowActivated = true.
-            // If minimized, SW_RESTORE first.
-            if IsIconic(hwnd) != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
+pub const ASFW_ANY: u32 = 0xFFFFFFFF;
+
+pub fn grant_foreground_permission() {
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+pub fn show_main_window() {
+    let mut hwnd = get_main_dashboard_window();
+    if hwnd.is_null() {
+        unsafe {
+            let title_wide: Vec<u16> = "Cosmo Downloader".encode_utf16().chain(std::iter::once(0)).collect();
+            hwnd = FindWindowW(std::ptr::null(), title_wide.as_ptr());
+        }
+    }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
+    }
+    if !hwnd.is_null() {
+        MAIN_WINDOW_HWND.store(hwnd as isize, Ordering::SeqCst);
+        unsafe {
+            let title: Vec<u16> = "Cosmo Downloader\0".encode_utf16().collect();
+            SetWindowTextW(hwnd, title.as_ptr());
+
+            let ex_style = GetWindowLongW(hwnd, -20);
+            SetWindowLongPtrW(hwnd, -20, ((ex_style & !(0x00000080 | 0x00080000)) | 0x00040000) as isize);
+            SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(hwnd, &mut rc);
+            let w = rc.right - rc.left;
+            let h = rc.bottom - rc.top;
+            if w < 760 || h < 480 || rc.left <= -10000 || rc.top <= -10000 {
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 100, 100, 1000, 640, 0x0020 | 0x0040);
+            } else {
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
             }
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            ShowWindow(hwnd, SW_SHOW);
-
-            // Break Windows foreground lock via keyboard event pulse (VK_MENU)
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, 9); // SW_RESTORE
+            }
+            ShowWindow(hwnd, 5); // SW_SHOW
+            ShowWindow(hwnd, 9); // SW_RESTORE
             keybd_event(0x12, 0, 0, 0); // VK_MENU down
             keybd_event(0x12, 0, 0x0002, 0); // VK_MENU up
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+            add_window_to_taskbar(hwnd);
+            InvalidateRect(hwnd, std::ptr::null(), 1);
+            UpdateWindow(hwnd);
+            PostMessageW(hwnd, 0 /* WM_NULL */, 0, 0);
+        }
+    }
+}
 
-            // Step 3: Topmost and BringWindowToTop so it is guaranteed in front of browser/active app
+pub fn make_popup_topmost() {
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
+    }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
+    }
+    if !hwnd.is_null() {
+        unsafe {
+            // Do NOT set GWLP_HWNDPARENT to main window — it forces the main window visible.
+            ShowWindow(hwnd, 9);
+            ShowWindow(hwnd, 5);
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
             BringWindowToTop(hwnd);
             SetForegroundWindow(hwnd);
+            add_window_to_taskbar(hwnd);
+        }
+    }
+}
 
-            // AttachThreadInput fallback if foreground activation is constrained by OS
-            let fg_wnd = GetForegroundWindow();
-            if !fg_wnd.is_null() && fg_wnd != hwnd {
-                let mut fg_pid = 0u32;
-                let fg_thread = GetWindowThreadProcessId(fg_wnd, &mut fg_pid);
-                let cur_thread = GetCurrentThreadId();
-                if fg_thread != 0 && fg_thread != cur_thread {
-                    AttachThreadInput(cur_thread, fg_thread, 1);
-                    BringWindowToTop(hwnd);
-                    SetForegroundWindow(hwnd);
-                    SetFocus(hwnd);
-                    AttachThreadInput(cur_thread, fg_thread, 0);
-                }
+pub fn remove_popup_topmost() {
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
+    }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
+    }
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
+        }
+    }
+}
+
+pub fn hide_main_window() {
+    make_window_invisible_toolwindow("Cosmo Downloader");
+    trim_working_set();
+}
+
+pub fn trim_working_set() {
+    #[link(name = "psapi")]
+    extern "system" {
+        fn EmptyWorkingSet(hProcess: *mut std::ffi::c_void) -> i32;
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetProcessWorkingSetSize(
+            hProcess: *mut std::ffi::c_void,
+            dwMinimumWorkingSetSize: usize,
+            dwMaximumWorkingSetSize: usize,
+        ) -> i32;
+    }
+    unsafe {
+        let handle = GetCurrentProcess();
+        let _ = EmptyWorkingSet(handle);
+        let _ = SetProcessWorkingSetSize(handle, usize::MAX, usize::MAX);
+    }
+}
+
+pub fn make_window_invisible_toolwindow(title: &str) {
+    let hwnd = get_main_dashboard_window();
+    let hwnd = if !hwnd.is_null() {
+        hwnd
+    } else {
+        unsafe {
+            let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            FindWindowW(std::ptr::null(), title_wide.as_ptr())
+        }
+    };
+    if !hwnd.is_null() {
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
             }
+            let ex_style = GetWindowLongW(hwnd, -20);
+            SetWindowLongPtrW(hwnd, -20, ((ex_style & !0x00040000) | 0x00000080 | 0x00080000) as isize);
+            SetLayeredWindowAttributes(hwnd, 0, 0, 2);
+            SetWindowPos(hwnd, std::ptr::null_mut(), -32000, -32000, 1, 1, 0x0004 | 0x0010 | 0x0020);
+            ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
+            remove_window_from_taskbar(hwnd);
+        }
+    }
+}
 
+pub fn restore_window_normal(title: &str) {
+    let hwnd = get_main_dashboard_window();
+    let hwnd = if !hwnd.is_null() {
+        hwnd
+    } else {
+        unsafe {
+            let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            FindWindowW(std::ptr::null(), title_wide.as_ptr())
+        }
+    };
+    if !hwnd.is_null() {
+        MAIN_WINDOW_HWND.store(hwnd as isize, Ordering::SeqCst);
+        unsafe {
+            let ex_style = GetWindowLongW(hwnd, -20);
+            SetWindowLongPtrW(hwnd, -20, ((ex_style & !(0x00000080 | 0x00080000)) | 0x00040000) as isize);
+            SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(hwnd, &mut rc);
+            if (rc.right - rc.left) <= 50 || (rc.bottom - rc.top) <= 50 || rc.left <= -10000 || rc.top <= -10000 {
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 100, 100, 1000, 640, 0x0020 | 0x0040);
+            } else {
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
+            }
+            ShowWindow(hwnd, 9);
+            ShowWindow(hwnd, 5);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            add_window_to_taskbar(hwnd);
+            PostMessageW(hwnd, 0 /* WM_NULL */, 0, 0);
+        }
+    }
+}
+
+pub fn flash_window_hwnd(hwnd: *mut std::ffi::c_void) {
+    if !hwnd.is_null() {
+        unsafe {
             let fwi = FLASHWINFO {
                 cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
                 hwnd,
                 dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
-                uCount: 4,
+                uCount: 3,
                 dwTimeout: 0,
             };
             FlashWindowEx(&fwi);
@@ -535,54 +908,16 @@ pub fn show_download_popup_window() {
     }
 }
 
-pub fn show_main_window() {
-    let hwnd = get_process_window();
-    if !hwnd.is_null() {
-        unsafe {
-            let style = GetWindowLongW(hwnd, -16) as u32;
-            let new_style = (style & !0x00C00000) | 0x00040000;
-            SetWindowLongPtrW(hwnd, -16, new_style as isize);
-            ShowWindow(hwnd, 9);
-            ShowWindow(hwnd, 5);
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
-            SetForegroundWindow(hwnd);
-        }
+pub fn flash_dialog_window() {
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
     }
-}
-
-pub fn make_popup_topmost() {
-    let hwnd = get_process_window();
-    if !hwnd.is_null() {
-        unsafe {
-            let style = GetWindowLongW(hwnd, -16) as u32;
-            let new_style = (style & !0x00C00000) | 0x00040000;
-            SetWindowLongPtrW(hwnd, -16, new_style as isize);
-            ShowWindow(hwnd, 9);
-            ShowWindow(hwnd, 5);
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
-            SetForegroundWindow(hwnd);
-        }
+    if hwnd.is_null() {
+        hwnd = get_process_window();
     }
-}
-
-pub fn remove_popup_topmost() {
-    let hwnd = get_process_window();
     if !hwnd.is_null() {
-        unsafe {
-            let style = GetWindowLongW(hwnd, -16) as u32;
-            let new_style = (style & !0x00C00000) | 0x00040000;
-            SetWindowLongPtrW(hwnd, -16, new_style as isize);
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
-        }
-    }
-}
-
-pub fn hide_main_window() {
-    let hwnd = get_process_window();
-    if !hwnd.is_null() {
-        unsafe {
-            ShowWindow(hwnd, 0);
-        }
+        flash_window_hwnd(hwnd);
     }
 }
 
@@ -714,4 +1049,214 @@ pub fn shell_open_folder_and_select(path: &str) {
             }
         }
     });
+}
+
+pub struct RawHwnd(pub *mut std::ffi::c_void);
+unsafe impl Send for RawHwnd {}
+unsafe impl Sync for RawHwnd {}
+
+impl raw_window_handle::HasWindowHandle for RawHwnd {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let hwnd = self.0 as isize;
+        let non_zero = std::num::NonZeroIsize::new(hwnd).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let handle = raw_window_handle::Win32WindowHandle::new(non_zero);
+        unsafe { Ok(raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Win32(handle))) }
+    }
+}
+
+impl raw_window_handle::HasDisplayHandle for RawHwnd {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::WindowsDisplayHandle::new();
+        unsafe { Ok(raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Windows(handle))) }
+    }
+}
+
+pub fn get_active_or_dialog_window() -> *mut std::ffi::c_void {
+    let mut hwnd = get_dialog_window();
+    if hwnd.is_null() {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if !fg.is_null() {
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(fg, &mut pid);
+                if pid == GetCurrentProcessId() {
+                    hwnd = fg;
+                }
+            }
+        }
+    }
+    if hwnd.is_null() {
+        hwnd = get_main_dashboard_window();
+    }
+    hwnd
+}
+
+pub fn pick_save_file_dialog(
+    title: &str,
+    start_dir: &Path,
+    file_name: &str,
+) -> Option<std::path::PathBuf> {
+    let hwnd = get_active_or_dialog_window();
+
+    // Temporarily demote the parent dialog from HWND_TOPMOST so the OS file dialog is in front
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0020);
+        }
+    }
+
+    let current_pid = unsafe { GetCurrentProcessId() };
+
+    // Watcher thread: explicitly forces the newly spawned modal dialog (#32770) into the foreground
+    let watcher = std::thread::spawn(move || {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            struct DlgData {
+                pid: u32,
+                dlg_hwnd: *mut std::ffi::c_void,
+            }
+            let mut data = DlgData {
+                pid: current_pid,
+                dlg_hwnd: std::ptr::null_mut(),
+            };
+            unsafe extern "system" fn enum_dlg(wnd: *mut std::ffi::c_void, lparam: isize) -> i32 {
+                let d = &mut *(lparam as *mut DlgData);
+                let mut p = 0u32;
+                GetWindowThreadProcessId(wnd, &mut p);
+                if p == d.pid {
+                    let mut buf = [0u16; 64];
+                    let len = GetClassNameW(wnd, buf.as_mut_ptr(), 64);
+                    if len > 0 {
+                        let cls = String::from_utf16_lossy(&buf[..len as usize]);
+                        if cls == "#32770" {
+                            d.dlg_hwnd = wnd;
+                            return 0;
+                        }
+                    }
+                }
+                1
+            }
+            unsafe {
+                EnumWindows(Some(enum_dlg), &mut data as *mut _ as isize);
+                if !data.dlg_hwnd.is_null() {
+                    SetWindowPos(data.dlg_hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+                    BringWindowToTop(data.dlg_hwnd);
+                    SetForegroundWindow(data.dlg_hwnd);
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut dialog = rfd::FileDialog::new()
+        .set_title(title)
+        .set_directory(start_dir)
+        .set_file_name(file_name);
+
+    let raw_holder = if !hwnd.is_null() {
+        Some(RawHwnd(hwnd))
+    } else {
+        None
+    };
+
+    if let Some(ref parent) = raw_holder {
+        dialog = dialog.set_parent(parent);
+    }
+
+    let result = dialog.save_file();
+    let _ = watcher.join();
+
+    // Restore parent dialog to HWND_TOPMOST and restore focus
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+    }
+
+    result
+}
+
+pub fn pick_folder_dialog(
+    title: &str,
+    start_dir: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    let hwnd = get_active_or_dialog_window();
+
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0020);
+        }
+    }
+
+    let current_pid = unsafe { GetCurrentProcessId() };
+
+    let watcher = std::thread::spawn(move || {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            struct DlgData {
+                pid: u32,
+                dlg_hwnd: *mut std::ffi::c_void,
+            }
+            let mut data = DlgData {
+                pid: current_pid,
+                dlg_hwnd: std::ptr::null_mut(),
+            };
+            unsafe extern "system" fn enum_dlg(wnd: *mut std::ffi::c_void, lparam: isize) -> i32 {
+                let d = &mut *(lparam as *mut DlgData);
+                let mut p = 0u32;
+                GetWindowThreadProcessId(wnd, &mut p);
+                if p == d.pid {
+                    let mut buf = [0u16; 64];
+                    let len = GetClassNameW(wnd, buf.as_mut_ptr(), 64);
+                    if len > 0 {
+                        let cls = String::from_utf16_lossy(&buf[..len as usize]);
+                        if cls == "#32770" {
+                            d.dlg_hwnd = wnd;
+                            return 0;
+                        }
+                    }
+                }
+                1
+            }
+            unsafe {
+                EnumWindows(Some(enum_dlg), &mut data as *mut _ as isize);
+                if !data.dlg_hwnd.is_null() {
+                    SetWindowPos(data.dlg_hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+                    BringWindowToTop(data.dlg_hwnd);
+                    SetForegroundWindow(data.dlg_hwnd);
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(dir) = start_dir {
+        dialog = dialog.set_directory(dir);
+    }
+
+    let raw_holder = if !hwnd.is_null() {
+        Some(RawHwnd(hwnd))
+    } else {
+        None
+    };
+
+    if let Some(ref parent) = raw_holder {
+        dialog = dialog.set_parent(parent);
+    }
+
+    let result = dialog.pick_folder();
+    let _ = watcher.join();
+
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0020 | 0x0040);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+    }
+
+    result
 }

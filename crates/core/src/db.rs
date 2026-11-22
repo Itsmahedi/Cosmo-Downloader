@@ -145,7 +145,6 @@ impl Database {
             INSERT OR IGNORE INTO settings (key, value) VALUES ('global_speed_limit_bps', '0');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('clipboard_monitor_enabled', 'true');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('minimize_to_tray_enabled', 'true');
-            INSERT OR IGNORE INTO settings (key, value) VALUES ('show_tray_icon_enabled', 'true');
             "#,
         )
         .map_err(|e| DownloadError::StateCorrupted(format!("Migration failed: {}", e)))?;
@@ -432,6 +431,14 @@ impl Database {
         .map_err(|e| DownloadError::StateCorrupted(e.to_string()))?;
         Ok(())
     }
+
+    /// Delete a setting key from the database if present.
+    pub async fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| DownloadError::StateCorrupted("Mutex poisoned".to_string()))?;
+        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(|e| DownloadError::StateCorrupted(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -495,5 +502,8 @@ mod tests {
         db.set_setting("max_concurrent_downloads", "5").await.unwrap();
         let updated = db.get_setting("max_concurrent_downloads").await.unwrap().unwrap();
         assert_eq!(updated, "5");
+
+        db.delete_setting("max_concurrent_downloads").await.unwrap();
+        assert!(db.get_setting("max_concurrent_downloads").await.unwrap().is_none());
     }
 }

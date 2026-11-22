@@ -397,6 +397,7 @@ async fn run_direct_download(args: DirectDownloadArgs) -> Result<()> {
         cookie: args.cookie,
         expected_sha256: args.checksum,
         resume: !args.no_resume,
+        custom_headers: None,
     };
 
     println!("============================================================");
@@ -495,6 +496,10 @@ fn render_progress(prog: &DownloadProgress, last_percent: &mut f64) {
         }
         DownloadStatus::Paused => {
             print!("\r[||] Paused                                                            ");
+            let _ = stdout().flush();
+        }
+        DownloadStatus::Processing => {
+            print!("\r[~] Processing and merging media streams...                           ");
             let _ = stdout().flush();
         }
         DownloadStatus::Completed => {

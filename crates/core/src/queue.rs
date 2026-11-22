@@ -63,6 +63,11 @@ impl QueueManager {
         &self.db
     }
 
+    /// Access the event sender.
+    pub fn event_sender(&self) -> &mpsc::Sender<QueueEvent> {
+        &self.event_tx
+    }
+
     /// Update maximum concurrent downloads.
     pub async fn set_max_concurrent(&self, max: usize) {
         let mut m = self.max_concurrent.lock().await;
@@ -122,29 +127,55 @@ impl QueueManager {
         max_speed_bps: u64,
         status: &str,
     ) -> Result<DownloadRecord> {
-        let parsed_url = validate_http_url(&options.url)?;
+        let is_torrent = crate::torrent::is_torrent_url(&options.url);
 
-        let (mut filename, target_path) = match &options.output_path {
-            Some(p) if !p.is_dir() && p.file_name().is_some() => {
-                let fname = p.file_name().unwrap().to_string_lossy().to_string();
-                let f = if !fname.trim().is_empty() {
-                    sanitize_filename(&fname)
-                } else {
-                    extract_filename(&options.headers, &parsed_url)
-                };
-                let sanitized_path = p.parent().unwrap_or(Path::new(".")).join(&f);
-                (f, sanitized_path)
+        let (mut filename, target_path) = if is_torrent {
+            let t_name = crate::torrent::extract_torrent_name(&options.url);
+            match &options.output_path {
+                Some(p) if !p.is_dir() && p.file_name().is_some() => {
+                    let fname = p.file_name().unwrap().to_string_lossy().to_string();
+                    let f = if !fname.trim().is_empty() {
+                        sanitize_filename(&fname)
+                    } else {
+                        t_name
+                    };
+                    let sanitized_path = p.parent().unwrap_or(Path::new(".")).join(&f);
+                    (f, sanitized_path)
+                }
+                Some(p) => {
+                    let full = p.join(&t_name);
+                    (t_name, full)
+                }
+                None => {
+                    let cat = category.unwrap_or_else(|| Category::detect_from_filename(&t_name));
+                    let full = cat.default_dir().join(&t_name);
+                    (t_name, full)
+                }
             }
-            Some(p) => {
-                let f = extract_filename(&options.headers, &parsed_url);
-                let full = p.join(&f);
-                (f, full)
-            }
-            None => {
-                let f = extract_filename(&options.headers, &parsed_url);
-                let cat = category.unwrap_or_else(|| Category::detect_from_filename(&f));
-                let full = cat.default_dir().join(&f);
-                (f, full)
+        } else {
+            let parsed_url = validate_http_url(&options.url)?;
+            match &options.output_path {
+                Some(p) if !p.is_dir() && p.file_name().is_some() => {
+                    let fname = p.file_name().unwrap().to_string_lossy().to_string();
+                    let f = if !fname.trim().is_empty() {
+                        sanitize_filename(&fname)
+                    } else {
+                        extract_filename(&options.headers, &parsed_url)
+                    };
+                    let sanitized_path = p.parent().unwrap_or(Path::new(".")).join(&f);
+                    (f, sanitized_path)
+                }
+                Some(p) => {
+                    let f = extract_filename(&options.headers, &parsed_url);
+                    let full = p.join(&f);
+                    (f, full)
+                }
+                None => {
+                    let f = extract_filename(&options.headers, &parsed_url);
+                    let cat = category.unwrap_or_else(|| Category::detect_from_filename(&f));
+                    let full = cat.default_dir().join(&f);
+                    (f, full)
+                }
             }
         };
 
@@ -180,7 +211,7 @@ impl QueueManager {
             status: status.to_string(),
             num_segments: options.num_segments,
             expected_sha256: options.expected_sha256.clone(),
-            custom_headers: None,
+            custom_headers: options.custom_headers.clone(),
             user_agent: options.user_agent.clone(),
             referer: options.referer.clone(),
             cookie: options.cookie.clone(),
@@ -229,6 +260,7 @@ impl QueueManager {
             status: "downloading".to_string(),
         }).await;
         let fname = record.filename.clone();
+        crate::log_event(&format!("QUEUE: task {} [{}] start_download_immediately url='{}'", id, fname, crate::probe::redact_url_for_log(&record.url)));
         let self_clone = Arc::clone(self);
         tokio::spawn(async move {
             self_clone.process_download(record, task_cancel).await;
@@ -249,6 +281,7 @@ impl QueueManager {
             status: "paused".to_string(),
         }).await;
         info!("Paused download task {}", id);
+        crate::log_event(&format!("QUEUE: task {} paused", id));
         Ok(())
     }
 
@@ -261,6 +294,7 @@ impl QueueManager {
             status: "queued".to_string(),
         }).await;
         info!("Resumed download task {}", id);
+        crate::log_event(&format!("QUEUE: task {} resumed", id));
         Ok(())
     }
 
@@ -344,6 +378,7 @@ impl QueueManager {
             referer: record.referer.clone(),
             cookie: record.cookie.clone(),
             expected_sha256: record.expected_sha256.clone(),
+            custom_headers: record.custom_headers.clone(),
             resume: true,
         };
 
@@ -376,16 +411,28 @@ impl QueueManager {
             }
         });
 
-        let is_stream = crate::youtube::is_streaming_site(&record.url);
+        let is_torrent = crate::torrent::is_torrent_url(&record.url);
+        let is_stream = !is_torrent && crate::youtube::is_streaming_site(&record.url);
         let ytdlp_bin = if is_stream { crate::youtube::find_ytdlp_binary() } else { None };
 
-        let result = if let Some(bin) = ytdlp_bin {
+        let result = if is_torrent {
+            crate::torrent::download_torrent(
+                &record.url,
+                Path::new(&record.target_path),
+                prog_tx,
+                cancel_token.clone(),
+            )
+            .await
+            .map(|_| PathBuf::from(&record.target_path))
+        } else if let Some(bin) = ytdlp_bin {
+            let format_selector = record.custom_headers.as_deref();
             crate::youtube::download_streaming_video(
                 &bin,
                 &record.url,
                 Path::new(&record.target_path),
                 cancel_token.clone(),
                 prog_tx,
+                format_selector,
             ).await
         } else {
             let mut downloader = Downloader::new(options, cancel_token.clone())
@@ -416,6 +463,7 @@ impl QueueManager {
                 let _ = self.db.update_status(&task_id, "completed", None).await;
                 let _ = self.event_tx.send(QueueEvent::TaskCompleted(task_id.clone())).await;
                 info!("Queue download {} completed successfully", task_id);
+                crate::log_event(&format!("QUEUE: task {} completed successfully: target='{}'", task_id, actual_path_str));
             }
             Err(DownloadError::Cancelled) => {
                 let next_status = if self.shutting_down.load(Ordering::SeqCst) {
@@ -429,6 +477,7 @@ impl QueueManager {
                     status: next_status.to_string(),
                 }).await;
                 info!("Queue download {} {}", task_id, next_status);
+                crate::log_event(&format!("QUEUE: task {} status changed to {}", task_id, next_status));
             }
             Err(e) => {
                 if self.shutting_down.load(Ordering::SeqCst) {
@@ -437,13 +486,17 @@ impl QueueManager {
                 }
                 let err_msg = e.to_string();
                 warn!("Queue download {} encountered error: {}", task_id, err_msg);
+                crate::log_event(&format!("QUEUE: task {} error: {}", task_id, err_msg));
 
                 let non_retryable = matches!(
                     &e,
                     DownloadError::InvalidUrl(_)
                         | DownloadError::ChecksumMismatch { .. }
                         | DownloadError::ServerFailed { status: 400 | 401 | 403 | 404 | 410 | 451, .. }
-                ) || err_msg.contains("Insufficient disk space");
+                ) || err_msg.contains("Insufficient disk space")
+                    || is_stream
+                    || err_msg.contains("403")
+                    || err_msg.contains("Forbidden");
 
                 // Exponential backoff retry logic for transient errors
                 if !non_retryable && record.retry_count < record.max_retries {
@@ -508,5 +561,25 @@ mod tests {
         queue.resume(&id).await.unwrap();
         let resumed_rec = queue.db().get_download(&id).await.unwrap().unwrap();
         assert_eq!(resumed_rec.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn test_queue_add_magnet() {
+        let db = Database::open_in_memory().unwrap();
+        let (tx, mut rx) = mpsc::channel(32);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let queue = Arc::new(QueueManager::new(db, 2, 0, tx));
+
+        let opt = DownloadOptions {
+            url: "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335380dc1f74c26&dn=ArchLinux_2026.iso".to_string(),
+            ..Default::default()
+        };
+
+        let id = queue.add_download(opt, None, 0).await.unwrap();
+        let rec = queue.db().get_download(&id).await.unwrap().unwrap();
+        assert_eq!(rec.status, "queued");
+        assert_eq!(rec.filename, "ArchLinux_2026.iso");
+        assert_eq!(rec.category, "Compressed");
     }
 }

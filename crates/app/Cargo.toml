@@ -10,6 +10,10 @@ name = "CosmoDownloader"
 path = "src/main.rs"
 
 [[bin]]
+name = "spike-viewport"
+path = "src/bin/spike_viewport.rs"
+
+[[bin]]
 name = "rustget-gui"
 path = "src/bin/rustget-gui.rs"
 
@@ -28,7 +32,9 @@ chrono = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
+directories = { workspace = true }
 rfd = "0.15"
+raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -174,6 +174,7 @@ fn test_1_download_a_then_b_while_a_is_downloading() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     });
     assert!(res_a, "Dialog A should open");
     assert_eq!(harness.download_windows.len(), 1);
@@ -196,6 +197,7 @@ fn test_1_download_a_then_b_while_a_is_downloading() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     });
     assert!(res_b, "Dialog B should open immediately while A is downloading");
     assert_eq!(harness.download_windows.len(), 2);
@@ -231,6 +233,7 @@ fn test_2_download_a_completely_close_dialog_then_download_b() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     }));
     harness.start_download(0);
 
@@ -250,6 +253,7 @@ fn test_2_download_a_completely_close_dialog_then_download_b() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     });
     assert!(res_b, "Video B should open successfully after A closed");
     assert_eq!(harness.download_windows.len(), 2);
@@ -276,6 +280,7 @@ fn test_3_repeat_10_times_in_a_row_no_white_window_no_stuck_dialog() {
             referer: None,
             user_agent: None,
             num_segments: None,
+            ..Default::default()
         });
         assert!(opened, "Dialog #{} must open without being stuck", i + 1);
 
@@ -344,6 +349,7 @@ fn test_5_close_dialog_b_with_x_before_it_loads_next_video_still_works() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     }));
     assert_eq!(harness.download_windows.len(), 1);
     assert_eq!(harness.download_windows[0].info_status, InfoLookupStatus::ReadingInfo);
@@ -363,6 +369,7 @@ fn test_5_close_dialog_b_with_x_before_it_loads_next_video_still_works() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     }));
     assert_eq!(harness.download_windows.len(), 2);
     assert!(harness.download_windows[1].is_open);

@@ -86,10 +86,12 @@
   stroke-linejoin: round !important;
 }
 
-/* Quality Selection Menu: 176px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18) */
+/* Quality Selection Menu: min 176px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18) */
 .cosmo-quality-menu {
   display: none !important;
-  width: 176px !important;
+  min-width: 176px !important;
+  width: max-content !important;
+  max-width: 240px !important;
   background: #22252a !important;
   border: 1px solid rgba(255, 255, 255, 0.08) !important;
   border-radius: 10px !important;
@@ -176,6 +178,28 @@
 .cosmo-quality-item:hover .meta,
 .cosmo-quality-item[aria-selected="true"] .meta {
   color: #8fa6c4 !important;
+}
+
+.cosmo-quality-item .meta.loading-placeholder {
+  display: inline-block !important;
+  width: 32px !important;
+  height: 8px !important;
+  border-radius: 4px !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+  animation: cosmo-pulse 1.2s ease-in-out infinite !important;
+}
+
+@keyframes cosmo-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+
+.cosmo-sizes-unavailable {
+  padding: 4px 8px !important;
+  text-align: center !important;
+  font-size: 11px !important;
+  color: #9097a1 !important;
+  font-style: italic !important;
 }
 
 /* Menu Footer: 12px muted, centered */

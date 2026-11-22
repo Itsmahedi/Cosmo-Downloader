@@ -19,6 +19,8 @@ pub struct MenuBarAction {
     pub open_options: bool,
     pub toggle_clipboard: bool,
     pub open_downloads_dir: bool,
+    pub copy_diagnostic_info: bool,
+    pub open_logs_folder: bool,
     pub open_about: bool,
 }
 
@@ -174,6 +176,15 @@ pub fn render_menu_bar(
             action.open_downloads_dir = true;
             ui.close_menu();
         }
+        if ui.button("Copy diagnostic info").clicked() {
+            action.copy_diagnostic_info = true;
+            ui.close_menu();
+        }
+        if ui.button("Open logs folder").clicked() {
+            action.open_logs_folder = true;
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button("About Cosmo Downloader").clicked() {
             action.open_about = true;
             ui.close_menu();

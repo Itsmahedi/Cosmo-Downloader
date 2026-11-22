@@ -5,6 +5,20 @@ All notable changes to Cosmo Downloader will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.6] - 2026-11-22
+
+### Added
+- **Interactive Category Filtering:** Added Category filter pill buttons with dynamic badges showing live item counts across All, Video, Audio, Documents, Compressed, Programs, and Others.
+- **Direct File & Folder Navigation:** Added quick-action "Open File" and "Open Folder" controls directly on completed downloads.
+- **Real-Time App Probing & 1-Click Launch:** Implemented loopback `/health` probing in the extension with a 3-state status badge (Connected, App Closed, Host Missing) and a 1-click "Launch Cosmo Downloader" action via native messaging.
+- **Segmented Transfer Bars & Live Speed HUD:** Added detailed segmented chunk visualization and live download speed indicator in main toolbar and tray.
+
+### Fixed
+- **Video Mini-Preview Download Button:** Prevented download button injection on YouTube mini previews, thumbnails, hover cards, and recommendations by strictly targeting active players (`#movie_player` and active Shorts).
+- **Foreground Window Management:** Fixed Windows foreground activation (`BringWindowToTop`, `SetForegroundWindow`, `AttachThreadInput`) ensuring the download info dialog raises reliably above browsers without stealing focus unnecessarily.
+- **Subsequent Downloads Debounce:** Fixed race conditions allowing rapid subsequent downloads from the same page without debounce locks or duplicate prompts.
+- **Unicode Filename Sanitization:** Hardened filename handling and disk path resolution for Unicode characters.
+
 ## [1.2.5] - 2026-11-14
 
 ### Fixed

@@ -71,7 +71,7 @@ button{cursor:pointer}
 
 /* ---------- main window ---------- */
 .app{display:grid;grid-template-rows:auto auto auto 1fr auto;height:580px}
-.title{flex:0 0 36px;display:flex;align-items:center;height:36px;background:var(--raise);border-bottom:1px solid var(--line);padding-left:var(--s3);gap:var(--s2);user-select:none}
+.title{display:flex;align-items:center;height:36px;background:var(--raise);border-bottom:1px solid var(--line);padding-left:var(--s3);gap:var(--s2);user-select:none}
 .title img{width:18px;height:18px;display:block}
 .title b{font-weight:500;font-size:var(--t-small);flex:1}
 .wc{display:flex;height:100%}
@@ -163,8 +163,12 @@ button{cursor:pointer}
 .mf{padding:var(--s2) var(--s3);text-align:center;font-size:var(--t-small);color:var(--muted)}
 
 /* ---------- Download File Info panel ---------- */
-.dw{width:560px;height:380px;max-width:100%;min-width:560px;min-height:380px;max-height:380px;display:flex;flex-direction:column;box-sizing:border-box}
-.dlb{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding:20px 24px 16px;box-sizing:border-box}
+.dw{width:560px;max-width:100%;height:380px;display:flex;flex-direction:column;box-sizing:border-box;transition:height 180ms cubic-bezier(0.2,0,0,1)}
+.dw.minimized{height:36px!important;min-height:36px!important;overflow:hidden}
+.dw.minimized .dlb,.dw.minimized .dlf{display:none!important}
+@media (max-width:600px){.dw{height:auto;min-height:380px}}
+.dlb[hidden],.dlf[hidden]{display:none}
+.dlb{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;padding:20px 24px 16px;box-sizing:border-box}
 .fs{display:flex;align-items:center;gap:var(--s3);height:48px;padding-bottom:0;border-bottom:1px solid var(--line);box-sizing:border-box;margin-bottom:16px}
 .fi{width:36px;height:36px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent)}
 .fs .tx{min-width:0}
@@ -172,7 +176,7 @@ button{cursor:pointer}
 .fs b.bad{color:var(--danger)}
 .fs .meta{display:block}
 .lb{display:block;font-size:var(--t-small);line-height:16px;color:var(--muted);margin:0 0 4px}
-.sv{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;align-items:start;height:54px;margin-bottom:12px}
+.sv{display:grid;grid-template-columns:140px minmax(0,1fr);gap:14px;align-items:start;height:54px;margin-bottom:12px}
 .sv>div{min-width:0}
 .pr{display:flex;gap:var(--s2);align-items:center}
 .pr .field,#dlLink{min-width:0;text-overflow:ellipsis}
@@ -206,6 +210,50 @@ input.field{
 .rm{display:flex;align-items:center;gap:var(--s2);font-size:var(--t-small);color:var(--muted);height:20px}
 .rm input{accent-color:var(--accent);margin:0}
 .dlf{flex:0 0 59px;height:59px;box-sizing:border-box;display:flex;justify-content:flex-end;align-items:center;gap:var(--s2);padding:12px 24px;border-top:1px solid var(--line)}
+
+.rs{font-size:var(--t-title);font-weight:600;line-height:1.3}
+.bar{height:6px;border-radius:3px;background:var(--raise);overflow:hidden;margin:var(--s2) 0}
+.bar i{display:block;height:100%;width:0;background:var(--accent);border-radius:3px;transition:width 300ms linear}
+.bar.paused i{background:var(--muted)}
+.sl{min-height:20px;margin-bottom:var(--s3)}
+.dstat{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s3)}
+.lbrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.lbrow .lb{margin:0}
+.btn.sm{height:24px;padding:0 var(--s2);font-size:var(--t-small)}
+.dmsg{min-height:18px;margin-top:var(--s2)}
+.dlb .field[readonly]{text-overflow:ellipsis}
+
+/* ---------- 7 · Options window ---------- */
+.op{--warn:#9a6700;width:620px;max-width:100%;height:440px;display:flex;flex-direction:column;box-sizing:border-box}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .op{--warn:#e2b04a}}
+:root[data-theme="dark"] .op{--warn:#e2b04a}
+@media (max-width:640px){.op{height:auto;min-height:440px}.op .opmid{flex-direction:column}.op nav{width:auto;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.op nav .opv{display:none}}
+.op .opmid{flex:1;min-height:0;display:flex}
+.op nav{width:150px;flex:none;padding:var(--s2);border-right:1px solid var(--line);background:var(--bg);display:flex;flex-direction:column;gap:2px}
+.op nav button{height:32px;padding:0 var(--s3);border:0;border-radius:var(--r-sm);background:transparent;color:var(--muted);text-align:left;font-size:var(--t-small);white-space:nowrap;transition:background var(--ease),color var(--ease)}
+.op nav button:hover{background:var(--raise);color:var(--text)}
+.op nav button[aria-current="true"]{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.op nav .opv{margin-top:auto;padding:var(--s2) var(--s3);font-size:11px;color:var(--muted)}
+.op .opmain{flex:1;min-width:0;overflow:auto;padding:var(--s4) var(--s5)}
+.op h3{margin:0 0 var(--s1);font-size:var(--t-title);font-weight:600}
+.op .opr{display:flex;align-items:center;gap:var(--s4);padding:var(--s3) 0;border-bottom:1px solid var(--line)}
+.op .opr:last-child{border-bottom:0}
+.op .opr .tx{flex:1;min-width:0}
+.op .opr b{display:block;font-weight:500}
+.op .opr small{display:block;font-size:var(--t-small);color:var(--muted)}
+.op .opr.off b,.op .opr.off small,.op .opr.off .ct{opacity:.45}
+.op .opr.off .ct{pointer-events:none}
+.op .opr small.hint{color:var(--warn);opacity:1}
+.op .opsw{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:10px;background:var(--line);transition:background var(--ease)}
+.op .opsw::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform var(--ease),background var(--ease)}
+.op .opsw[aria-checked="true"]{background:var(--accent)}
+.op .opsw[aria-checked="true"]::after{transform:translateX(16px);background:var(--on-accent)}
+.op input[type=range]{accent-color:var(--accent);width:140px}
+.op .opwarn{margin-top:var(--s3);padding:var(--s2) var(--s3);border-radius:var(--r-sm);background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--warn);font-size:var(--t-small)}
+.op .operr{color:var(--danger);font-size:var(--t-small);margin-top:var(--s1)}
+.op .opft{flex:none;display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--line)}
+.op .opft .opl{margin-right:auto;border-color:transparent;color:var(--muted)}
+.op .btn[aria-disabled="true"]{opacity:.45;pointer-events:none}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -273,7 +321,7 @@ input.field{
           <div class="cap">Categories</div><nav class="nav" id="navC" aria-label="Categories"></nav>
         </aside>
         <div class="tbl">
-          <div class="th"><input type="checkbox" id="all" aria-label="Select all"><span>File name</span><span>Size</span><span>Progress</span><span>Speed</span><span>Status</span></div>
+          <div class="th"><input type="checkbox" id="selAll" aria-label="Select all"><span>File name</span><span>Size</span><span>Progress</span><span>Speed</span><span>Status</span></div>
           <div class="rows" id="rows"></div>
         </div>
       </div>
@@ -315,29 +363,102 @@ input.field{
       </div>
     </section>
 
-    <section class="stage">
-      <h2>4 · Download File Info popup</h2>
-      <input type="hidden" id="dlTitle" value="আমার সোনার বাংলা - পর্ব ১">
-      <div class="win dw" id="dw">
-        <div class="title"><img data-logo alt=""><b>Download File Info</b><div class="wc"><button type="button" class="x" id="dlX" aria-label="Close"><svg class="i"><use href="#close"/></svg></button></div></div>
-        <div class="dlb">
-          <div style="height:54px;display:flex;flex-direction:column;gap:4px;margin-bottom:12px;"><label class="lb" for="dlLink">Link</label><input class="field" id="dlLink" type="url" spellcheck="false" placeholder="Paste a link" value="https://www.youtube.com/watch?v=RlPNh_PBZb4"></div>
-          <div class="fs"><div class="fi"><svg class="i"><use id="dlIco" href="#video"/></svg></div><div class="tx"><b id="dlName"></b><span class="meta" id="dlMeta"></span></div></div>
-          <div class="sv">
-            <div><label class="lb" for="dlCat">Category</label><select class="field" id="dlCat"><option>Video</option><option>Music</option><option>Documents</option><option>Compressed</option><option>Programs</option><option>Other</option></select></div>
-            <div><label class="lb" for="dlPath">Save to</label><div class="pr"><input class="field" id="dlPath"><button class="btn outline icon" type="button" id="dlBrowse" aria-label="Change folder" title="Change folder"><svg class="i"><use href="#folder"/></svg></button></div></div>
-          </div>
-          <label class="rm"><input type="checkbox" id="dlRem" checked><span id="dlRemT"></span></label>
+  </div>
+  <section class="stage">
+    <h2>4 · Download File Info popup</h2>
+    <input type="hidden" id="dlTitle" value="আমার সোনার বাংলা - পর্ব ১">
+    <div class="win dw" id="dw" role="dialog" aria-label="Download File Info">
+      <div class="title"><img data-logo alt=""><b>Download File Info</b><div class="wc"><button type="button" id="dlMin" aria-label="Minimize"><svg class="i"><use href="#min"/></svg></button><button type="button" class="x" id="dlX" aria-label="Close"><svg class="i"><use href="#close"/></svg></button></div></div>
+
+      <!-- view 1: info form (before download) -->
+      <div class="dlb" id="vInfo">
+        <div style="height:54px;display:flex;flex-direction:column;gap:4px;margin-bottom:12px;"><label class="lb" for="dlLink">Link</label><input class="field" id="dlLink" type="url" spellcheck="false" placeholder="Paste a link" value="https://www.youtube.com/watch?v=RlPNh_PBZb4"></div>
+        <div class="fs"><div class="fi"><svg class="i"><use id="dlIco" href="#video"/></svg></div><div class="tx"><b id="dlName"></b><span class="meta" id="dlMeta"></span></div></div>
+        <div class="sv">
+          <div><label class="lb" for="dlCat">Category</label><select class="field" id="dlCat"><option>Video</option><option>Music</option><option>Documents</option><option>Compressed</option><option>Programs</option><option>Other</option></select></div>
+          <div><label class="lb" for="dlPath">Save to</label><div class="pr"><input class="field" id="dlPath"><button class="btn outline icon" type="button" id="dlBrowse" aria-label="Change folder" title="Change folder"><svg class="i"><use href="#folder"/></svg></button></div></div>
         </div>
-        <div class="dlf"><button class="btn outline" type="button" id="dlCancel">Cancel</button><button class="btn primary" type="button" id="dlGo"><svg class="i"><use href="#down"/></svg>Start download</button></div>
+        <label class="rm"><input type="checkbox" id="dlRem" checked><span id="dlRemT"></span></label>
+      </div>
+      <div class="dlf" id="fInfo"><button class="btn outline" type="button" id="dlCancel">Cancel</button><button class="btn primary" type="button" id="dlGo"><svg class="i"><use href="#down"/></svg>Start download</button></div>
+
+      <!-- view 2: downloading / paused -->
+      <div class="dlb" id="vRun" hidden>
+        <div class="fs"><div class="fi"><svg class="i"><use id="rIco" href="#video"/></svg></div><div class="tx"><b id="rName"></b><span class="meta" id="rMeta"></span></div></div>
+        <div class="rs num" id="rStat">Downloading… 0%</div>
+        <div class="bar" id="rBar"><i></i></div>
+        <div class="meta num sl" id="rInfo"></div>
+        <div class="sl" id="rAsk" hidden>Cancel this download? The partial file will be deleted.</div>
+        <div><span class="lb">Saving to</span><input class="field" id="rPath" readonly aria-label="Saving to"></div>
+      </div>
+      <div class="dlf" id="fRun" hidden><button class="btn outline" type="button" id="rBg">Run in background</button><button class="btn outline" type="button" id="rPause"></button><button class="btn outline" type="button" id="rCancel">Cancel</button></div>
+      <div class="dlf" id="fAsk" hidden><button class="btn outline" type="button" id="aCancel">Cancel download</button><button class="btn primary" type="button" id="aKeep">Keep downloading</button></div>
+
+      <!-- view 3: complete (stays open until Close) -->
+      <div class="dlb" id="vDone" hidden>
+        <div class="fs"><div class="fi"><svg class="i"><use id="dIco" href="#video"/></svg></div><div class="tx"><b id="dName"></b><span class="meta" id="dMeta"></span></div></div>
+        <div class="dstat"><div class="fi"><svg class="i"><use href="#check"/></svg></div><div><div class="rs">Download complete</div><div class="meta num" id="dSize"></div></div></div>
+        <div><div class="lbrow"><span class="lb">Saved file</span><button class="btn outline sm" type="button" id="dCopy">Copy path</button></div><input class="field" id="dPath" readonly aria-label="Saved file"></div>
+        <div class="meta dmsg" id="dMsg" aria-live="polite"></div>
+      </div>
+      <div class="dlf" id="fDone" hidden><button class="btn primary" type="button" id="dOpen">Open file</button><button class="btn outline" type="button" id="dFolder">Show in folder</button><button class="btn outline" type="button" id="dClose">Close</button></div>
+    </div>
+  </section>
+
+  <div class="row2">
+    <section class="stage">
+      <h2>5 · Downloading</h2>
+      <div class="win dw" id="dw5" role="group" aria-label="Downloading">
+        <div class="title"><img data-logo alt=""><b>Download File Info</b><div class="wc"><button type="button" aria-label="Minimize"><svg class="i"><use href="#min"/></svg></button><button type="button" class="x" aria-label="Close"><svg class="i"><use href="#close"/></svg></button></div></div>
+        <div class="dlb">
+          <div class="fs"><div class="fi"><svg class="i"><use href="#video"/></svg></div><div class="tx"><b data-r="name"></b><span class="meta">Video · youtube.com</span></div></div>
+          <div class="rs num" data-r="stat"></div>
+          <div class="bar" data-r="bar"><i></i></div>
+          <div class="meta num sl" data-r="info"></div>
+          <div class="sl" data-r="ask" hidden>Cancel this download? The partial file will be deleted.</div>
+          <div><span class="lb">Saving to</span><input class="field" data-r="path" readonly aria-label="Saving to"></div>
+        </div>
+        <div class="dlf" data-r="foot"></div>
+      </div>
+    </section>
+    <section class="stage">
+      <h2>6 · Download complete</h2>
+      <div class="win dw" id="dw6" role="group" aria-label="Download complete">
+        <div class="title"><img data-logo alt=""><b>Download File Info</b><div class="wc"><button type="button" aria-label="Minimize"><svg class="i"><use href="#min"/></svg></button><button type="button" class="x" aria-label="Close"><svg class="i"><use href="#close"/></svg></button></div></div>
+        <div class="dlb">
+          <div class="fs"><div class="fi"><svg class="i"><use href="#video"/></svg></div><div class="tx"><b data-r="name"></b><span class="meta">Video · youtube.com</span></div></div>
+          <div class="dstat"><div class="fi"><svg class="i"><use href="#check"/></svg></div><div><div class="rs">Download complete</div><div class="meta num" data-r="size"></div></div></div>
+          <div><div class="lbrow"><span class="lb">Saved file</span><button class="btn outline sm" type="button" data-a="copy">Copy path</button></div><input class="field" data-r="path" readonly aria-label="Saved file"></div>
+          <div class="meta dmsg" data-r="msg" aria-live="polite"></div>
+        </div>
+        <div class="dlf"><button class="btn primary" type="button" data-a="open">Open file</button><button class="btn outline" type="button" data-a="folder">Show in folder</button><button class="btn outline" type="button" data-a="close">Close</button></div>
       </div>
     </section>
   </div>
+
+  <section class="stage">
+    <h2>7 · Options</h2>
+    <div class="win op" id="op" role="dialog" aria-label="Options">
+      <div class="title"><img data-logo alt=""><b>Options</b><div class="wc"><button type="button" class="x" aria-label="Close"><svg class="i"><use href="#close"/></svg></button></div></div>
+      <div class="opmid">
+        <nav id="opNav" aria-label="Options sections">
+          <button type="button" data-p="general" aria-current="true">General</button>
+          <button type="button" data-p="downloads">Downloads</button>
+          <button type="button" data-p="notif">Notifications</button>
+          <button type="button" data-p="network">Network</button>
+          <span class="opv">Cosmo Downloader v1.2.5</span>
+        </nav>
+        <div class="opmain" id="opPg"></div>
+      </div>
+      <div class="opft"><button class="btn outline opl" type="button" id="opReset">Reset to defaults</button><button class="btn outline" type="button" id="opCancel">Cancel</button><button class="btn primary" type="button" id="opSave">Save</button></div>
+    </div>
+  </section>
+
   <div class="copy">© 2026 Mahedi. All rights reserved.</div>
 </div>
 
 <script>
-var LOGO="data:image/png;base64,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";
+var LOGO="data:image/png;base64,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";
 document.querySelectorAll("[data-logo]").forEach(function(i){i.src=LOGO});
 var STAT=[["all","All Downloads","all"],["Downloading","Downloading","down"],["Completed","Completed","check"],["Paused","Paused","pause"]];
 var CATS=[["all","All Categories","all"],["Video","Video","video"],["Music","Music","music"],["Documents","Documents","doc"],["Compressed","Compressed","zip"],["Programs","Programs","app"],["Other","Other","other"]];
@@ -376,7 +497,7 @@ function render(){
   }).join(""):'<div class="empty"><svg class="i"><use href="#down"/></svg><b>No downloads in this view</b><span class="meta">Downloads captured from browser extensions or clipboard appear here.</span><button class="btn primary" type="button" id="eAdd"><svg class="i"><use href="#plus"/></svg>Add Download URL</button></div>';
   var any=Object.keys(sel).some(function(k){return sel[k]});
   $("bDel").disabled=!any;
-  $("all").checked=list.length>0&&list.every(function(x){return sel[x.id]});
+  $("selAll").checked=list.length>0&&list.every(function(x){return sel[x.id]});
   var t=items.reduce(function(a,x){return a+(x.st==="Downloading"?x.sp:0)},0);
   $("sl").textContent=list.length+" items · "+t.toFixed(1)+" MB/s · Warp Engine active";
   $("cnt").textContent=caught;
@@ -397,12 +518,12 @@ function add(name,cat,size){
 $("navS").addEventListener("click",function(e){var a=e.target.closest("a");if(!a)return;e.preventDefault();fs=a.dataset.v;render()});
 $("navC").addEventListener("click",function(e){var a=e.target.closest("a");if(!a)return;e.preventDefault();fc=a.dataset.v;render()});
 $("rows").addEventListener("click",function(e){
-  if(e.target.closest("#eAdd")){add("new-download-"+nid+".zip");return}
+  if(e.target.closest("#eAdd")){openDlg({});return}
   var r=e.target.closest(".item");if(!r)return;var id=r.dataset.id;
   sel[id]=e.target.tagName==="INPUT"?e.target.checked:!sel[id];render();
 });
-$("all").addEventListener("change",function(e){shown().forEach(function(x){sel[x.id]=e.target.checked});render()});
-$("bAdd").onclick=function(){add("new-download-"+nid+".zip")};
+$("selAll").addEventListener("change",function(e){shown().forEach(function(x){sel[x.id]=e.target.checked});render()});
+$("bAdd").onclick=function(){openDlg({})};
 $("bPause").onclick=function(){items.forEach(function(x){if(x.st==="Downloading"){x.st="Paused";x.sp=0}});render()};
 $("bResume").onclick=function(){items.forEach(function(x){if(x.st==="Paused"){x.st="Downloading";x.sp=6+Math.random()*10}});render()};
 $("bDel").onclick=function(){items=items.filter(function(x){return !sel[x.id]});sel={};render()};
@@ -410,19 +531,20 @@ setInterval(function(){
   var ch=false;
   items.forEach(function(x){if(x.st==="Downloading"){x.p=Math.min(100,x.p+x.sp/x.size*100*0.8);if(x.p>=100){x.st="Completed";x.sp=0}ch=true}});
   if(ch)render();
+  dlgTick();
 },800);
 
 /* extension popup: sends a link to the main app */
 function sendUrl(){
   var u=$("pu").value.trim();if(!u)return;
   var n;try{n=decodeURIComponent(new URL(u).pathname.split("/").pop())||new URL(u).hostname}catch(e){n=u.slice(0,40)}
-  caught++;add(n);$("pu").value="";
+  caught++;$("pu").value="";openExt(u,n);
 }
 $("ps").onclick=sendUrl;
 $("pu").addEventListener("keydown",function(e){if(e.key==="Enter")sendUrl()});
 
 /* video quality menu */
-var Q=[["1080p","148 MB",148,"Video"],["720p","82 MB",82,"Video"],["480p","41 MB",41,"Video"],["360p","24 MB",24,"Video"],null,["Audio only","9 MB",9,"Music"]];
+var Q=[["1080p","—",null,"Video"],["720p","—",null,"Video"],["480p","—",null,"Video"],["360p","—",null,"Video"],null,["Audio only","—",null,"Music"]];
 var qi=0,vm=$("vm");
 Q.forEach(function(q,i){
   if(!q){vm.appendChild(document.createElement("hr"));return}
@@ -434,7 +556,7 @@ Q.forEach(function(q,i){
 vm.addEventListener("click",function(e){
   var b=e.target.closest("button");if(!b)return;var q=Q[b.dataset.i];
   vm.querySelectorAll("button").forEach(function(o){o.removeAttribute("aria-selected")});b.setAttribute("aria-selected","true");
-  caught++;add("video-"+q[0].split(" ")[0].toLowerCase()+"."+(q[3]==="Music"?"mp3":"mp4"),q[3],q[2]);
+  caught++;openDlg({cat:q[3],size:q[2]});
   vm.hidden=true;$("vb").setAttribute("aria-expanded","false");$("vbt").textContent="Sent to Cosmo";
   setTimeout(function(){$("vbt").textContent="Download"},1600);
 });
@@ -450,7 +572,7 @@ function sGood(t,vid,room){
   if(/^(CON|PRN|AUX|NUL|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3])(\..*)?$/i.test(n))n="_"+n;
   return n;
 }
-function vidId(u){try{return new URL(u).searchParams.get("v")||"video"}catch(e){return"video"}}
+function vidId(u){try{var x=new URL(u);return x.searchParams.get("v")||(x.hostname==="youtu.be"?x.pathname.slice(1):"")||"video"}catch(e){return"video"}}
 function hostOf(u){try{return new URL(u).hostname.replace(/^www\./,"")}catch(e){return"link"}}
 function baseDir(c){return pick||mem[c]||"C:\\Users\\steam\\"+DIRS[c]+"\\"}
 function alignPathEnd(){
@@ -473,7 +595,7 @@ function normLink(link){
 }
 function dRefresh(){
   if(!$("dlCat"))return;
-  var c=$("dlCat").value,t=$("dlTitle").value,rawLink=$("dlLink").value,dir=baseDir(c),ext=EXT[c];
+  var c=$("dlCat").value,t=$("dlTitle").value,rawLink=$("dlLink").value,dir=baseDir(c),ext=pendExt||EXT[c];
   var link=normLink(rawLink);
   if(link!==rawLink)$("dlLink").value=link;
   var path=dir+sGood(t,vidId(link),250-dir.length-ext.length-1)+"."+ext;
@@ -486,24 +608,218 @@ function dRefresh(){
   if($("dlGo"))$("dlGo").disabled=!link.trim();
   setTimeout(alignPathEnd, 0);
 }
+/* ---------- IDM-style flow: info -> downloading -> complete (same window) ---------- */
+var view="Info",cur=null,doneItem=null,doneQ=[],idle=true,pendExt=null,pendSize=null,SAMPLE_LINK=$("dlLink").value,SAMPLE_TITLE=$("dlTitle").value;
+function fmt1(mb){return mb>=1000?(mb/1000).toFixed(2)+" GB":mb.toFixed(1)+" MB"}
+function fmtTime(s){s=Math.max(1,Math.round(s));if(s<60)return s+" s";if(s<3600)return Math.floor(s/60)+" min "+(s%60)+" s";return Math.floor(s/3600)+" h "+Math.floor(s%3600/60)+" min"}
+function setView(v){
+  view=v;var body=v==="Ask"?"Run":v;
+  ["Info","Run","Done"].forEach(function(n){$("v"+n).hidden=n!==body});
+  ["Info","Run","Ask","Done"].forEach(function(n){$("f"+n).hidden=n!==v});
+  $("rInfo").hidden=v==="Ask";$("rAsk").hidden=v!=="Ask";
+}
+function toIdle(){
+  cur=null;doneItem=null;idle=true;setView("Info");dRefresh();
+  if(doneQ.length)showDone(doneQ.shift());
+}
+function openDlg(o){
+  if(cur){cur.bg=true;cur=null}
+  doneItem=null;idle=false;pendExt=o.ext||null;pendSize=o.size||null;pick=null;
+  $("dlLink").value=o.link||SAMPLE_LINK;$("dlTitle").value=o.title||SAMPLE_TITLE;$("dlCat").value=o.cat||"Video";
+  setView("Info");dRefresh();
+  $("dw").scrollIntoView({behavior:"smooth",block:"center"});$("dlGo").focus({preventScroll:true});
+}
+function openExt(u,n){
+  var m=/^(.+)\.([A-Za-z0-9]{1,5})$/.exec(n);
+  if(m)openDlg({link:u,title:m[1],ext:m[2].toLowerCase(),cat:guess(n)});
+  else openDlg({link:u});
+}
 function startDl(){
   var c=$("dlCat").value,path=$("dlPath").value,dir=path.slice(0,path.lastIndexOf("\\")+1);
-  var remember=$("dlRem").checked;
-  if(remember)mem[c]=dir;else delete mem[c];
-  var fname=path.split("\\").pop();
-  add(fname,c);
-  caught++;
-  pick=null;dRefresh();
+  if($("dlRem").checked)mem[c]=dir;else delete mem[c];
+  var it={id:nid++,n:path.split("\\").pop(),size:pendSize||Math.round(80+Math.random()*140),p:0,sp:6+Math.random()*10,st:"Downloading",c:c,path:path,link:$("dlLink").value,dlg:true,bg:false};
+  items.unshift(it);cur=it;pendSize=null;pick=null;idle=false;render();
+  $("rIco").setAttribute("href","#"+(ICON[c]||"other"));
+  $("rName").textContent=it.n;$("rMeta").textContent=c+" · "+hostOf(it.link);
+  $("rPath").value=path;$("rPath").title=path;
+  setView("Run");updRun();$("rPause").focus({preventScroll:true});
 }
-function cancelDl(){pick=null;dRefresh()}
-if($("dlLink"))$("dlLink").addEventListener("input",dRefresh);
-if($("dlCat"))$("dlCat").addEventListener("change",function(){pick=null;dRefresh()});
-if($("dlBrowse"))$("dlBrowse").onclick=function(){var i=ALT.indexOf(baseDir($("dlCat").value));pick=ALT[(i+1)%ALT.length];dRefresh()};
-if($("dlPath"))$("dlPath").addEventListener("blur", alignPathEnd);
-if($("dlGo"))$("dlGo").onclick=startDl;
-if($("dlCancel"))$("dlCancel").onclick=cancelDl;
-if($("dlX"))$("dlX").onclick=cancelDl;
+function updRun(){
+  if(!cur)return;
+  var it=cur,paused=it.st==="Paused",done=it.size*it.p/100;
+  $("rStat").textContent=(paused?"Paused · ":"Downloading… ")+Math.floor(it.p)+"%";
+  $("rBar").firstElementChild.style.width=it.p+"%";$("rBar").className="bar"+(paused?" paused":"");
+  $("rInfo").textContent=fmt1(done)+" of "+fmt1(it.size)+(paused?"":" · "+it.sp.toFixed(1)+" MB/s · "+fmtTime((it.size-done)/it.sp)+" left");
+  $("rPause").innerHTML=paused?'<svg class="i"><use href="#play"/></svg>Resume':'<svg class="i"><use href="#pause"/></svg>Pause';
+}
+function showDone(it){
+  doneItem=it;
+  $("dIco").setAttribute("href","#"+(ICON[it.c]||"other"));
+  $("dName").textContent=it.n;$("dMeta").textContent=it.c+" · "+hostOf(it.link||"");
+  $("dSize").textContent="Saved "+fmt1(it.size);
+  $("dPath").value=it.path;$("dPath").title=it.path;$("dMsg").textContent="";
+  setView("Done");$("dOpen").focus({preventScroll:true});
+}
+function dlgTick(){
+  if(cur){
+    if(items.indexOf(cur)<0)toIdle();
+    else if(cur.st==="Completed"){var d=cur;cur=null;showDone(d)}
+    else updRun();
+  }
+  items.forEach(function(x){if(x.dlg&&x.bg&&x.st==="Completed"&&!x.seen){x.seen=true;doneQ.push(x)}});
+  if(idle&&!cur&&!doneItem&&doneQ.length)showDone(doneQ.shift());
+}
+function note(t){$("dMsg").textContent=t;setTimeout(function(){if($("dMsg").textContent===t)$("dMsg").textContent=""},2600)}
+function copyPath(){
+  var b=$("dCopy"),p=$("dPath").value;
+  function ok(v){b.textContent=v;setTimeout(function(){b.textContent="Copy path"},1600)}
+  function fb(){var r=false;try{$("dPath").focus();$("dPath").select();r=document.execCommand("copy")}catch(e){}ok(r?"Copied":"Press Ctrl+C")}
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(p).then(function(){ok("Copied")},fb);else fb();
+}
+function xAct(){
+  if(view==="Info")toIdle();
+  else if(view==="Run"){cur.bg=true;toIdle()}
+  else if(view==="Ask")setView("Run");
+  else toIdle();
+}
+$("dlGo").onclick=startDl;
+$("dlCancel").onclick=toIdle;$("dlX").onclick=xAct;if($("dlMin")){$("dlMin").onclick=function(){$("dw").classList.toggle("minimized")}};
+$("rBg").onclick=function(){cur.bg=true;toIdle()};
+$("rPause").onclick=function(){
+  if(!cur)return;
+  if(cur.st==="Downloading"){cur.st="Paused";cur.sp=0}else if(cur.st==="Paused"){cur.st="Downloading";cur.sp=6+Math.random()*10}
+  render();updRun();
+};
+$("rCancel").onclick=function(){setView("Ask");$("aKeep").focus({preventScroll:true})};
+$("aKeep").onclick=function(){setView("Run")};
+$("aCancel").onclick=function(){var d=cur;items=items.filter(function(x){return x!==d});delete sel[d.id];render();toIdle()};
+$("dClose").onclick=toIdle;
+$("dCopy").onclick=copyPath;
+$("dOpen").onclick=function(){note("Demo: this would open the file with its default app.")};
+$("dFolder").onclick=function(){note("Demo: this would show the file in Explorer.")};
+$("dw").addEventListener("keydown",function(e){
+  if(e.key==="Escape"){xAct()}
+  else if(e.key==="Enter"&&view==="Info"&&e.target.tagName==="INPUT"&&e.target.type!=="checkbox"&&!$("dlGo").disabled){e.preventDefault();startDl()}
+});
+$("vInfo").addEventListener("input",function(){idle=false});
+$("vInfo").addEventListener("change",function(){idle=false});
+$("dlLink").addEventListener("input",dRefresh);
+$("dlCat").addEventListener("change",function(){pick=null;dRefresh()});
+$("dlBrowse").onclick=function(){var i=ALT.indexOf(baseDir($("dlCat").value));pick=ALT[(i+1)%ALT.length];dRefresh()};
+$("dlPath").addEventListener("blur",alignPathEnd);
 dRefresh();
+
+/* ---------- sections 5 and 6: always-visible previews of the downloading and complete windows ---------- */
+(function(){
+  var SIZE=284.3,SP=8.2,S={p:42,pz:false,ask:false,hold:0},r5=$("dw5"),r6=$("dw6");
+  var name=sGood(SAMPLE_TITLE,"RlPNh_PBZb4",200)+".mp4",path="C:\\Users\\steam\\Videos\\"+name;
+  function q(r,k){return r.querySelector('[data-r="'+k+'"]')}
+  [r5,r6].forEach(function(r){q(r,"name").textContent=name;q(r,"path").value=path;q(r,"path").title=path});
+  q(r6,"size").textContent="Saved "+fmt1(SIZE);
+  function draw5(){
+    var done=SIZE*S.p/100,bar=q(r5,"bar");
+    q(r5,"stat").textContent=(S.pz?"Paused · ":"Downloading… ")+Math.floor(S.p)+"%";
+    bar.className="bar"+(S.pz?" paused":"");bar.firstElementChild.style.width=S.p+"%";
+    q(r5,"info").textContent=fmt1(done)+" of "+fmt1(SIZE)+(S.pz?"":" · "+SP.toFixed(1)+" MB/s · "+fmtTime((SIZE-done)/SP)+" left");
+    q(r5,"info").hidden=S.ask;q(r5,"ask").hidden=!S.ask;
+    q(r5,"foot").innerHTML=S.ask
+      ?'<button class="btn outline" type="button" data-a="restart">Cancel download</button><button class="btn primary" type="button" data-a="keep">Keep downloading</button>'
+      :'<button class="btn outline" type="button" data-a="restart">Run in background</button><button class="btn '+(S.pz?'primary':'outline')+'" type="button" data-a="pause">'+(S.pz?'<svg class="i"><use href="#play"/></svg>Resume':'<svg class="i"><use href="#pause"/></svg>Pause')+'</button><button class="btn outline" type="button" data-a="ask">Cancel</button>';
+  }
+  q(r5,"foot").addEventListener("click",function(e){
+    var b=e.target.closest("[data-a]");if(!b)return;var a=b.dataset.a;
+    if(a==="pause")S.pz=!S.pz;else if(a==="ask")S.ask=true;else if(a==="keep")S.ask=false;
+    else{S.p=0;S.pz=false;S.ask=false;S.hold=0}
+    draw5();
+  });
+  setInterval(function(){
+    if(S.pz||S.ask)return;
+    if(S.p>=100){if(++S.hold>6){S.p=0;S.hold=0}}else S.p=Math.min(100,S.p+1.2);
+    draw5();
+  },250);
+  draw5();
+  var msg=q(r6,"msg");
+  function say(t){msg.textContent=t;setTimeout(function(){if(msg.textContent===t)msg.textContent=""},2600)}
+  r6.addEventListener("click",function(e){
+    var b=e.target.closest("[data-a]");if(!b)return;var a=b.dataset.a,inp=q(r6,"path");
+    if(a==="open")say("Demo: this would open the file with its default app.");
+    else if(a==="folder")say("Demo: this would show the file in Explorer.");
+    else if(a==="close")msg.textContent="";
+    else if(a==="copy"){
+      var ok=function(v){b.textContent=v;setTimeout(function(){b.textContent="Copy path"},1600)};
+      var fb=function(){var r=false;try{inp.focus();inp.select();r=document.execCommand("copy")}catch(x){}ok(r?"Copied":"Press Ctrl+C")};
+      if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(path).then(function(){ok("Copied")},fb);else fb();
+    }
+  });
+})();
+
+/* ---------- 7 · Options window (preview with working dependencies) ---------- */
+(function(){
+  var g=function(id){return document.getElementById(id)},root=g("op");
+  var DEF={startup:false,minstart:false,tray:true,mintray:true,clip:false,notif:true,cwin:true,openmain:false,threads:8,speed:0,unit:"MB/s",folder:"",proxy:""};
+  var S={startup:true,minstart:true,tray:true,mintray:true,clip:false,notif:false,cwin:false,openmain:false,threads:8,speed:0,unit:"KB/s",folder:"",proxy:""};
+  var saved=JSON.parse(JSON.stringify(S)),page="general";
+  function esc(t){return String(t).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;")}
+  function sw(k,on,label){return '<button type="button" class="opsw" role="switch" aria-checked="'+on+'" data-k="'+k+'" aria-label="'+label+'"></button>'}
+  function row(l,d,c,off,hint){return '<div class="opr'+(off?' off':'')+'"><div class="tx"><b>'+l+'</b><small>'+d+'</small>'+(off&&hint?'<small class="hint">'+hint+'</small>':'')+'</div><div class="ct">'+c+'</div></div>'}
+  function proxyOk(v){return v===""||/^(https?|socks5h?):\/\/[^\s\/]+(:\d{1,5})?\/?$/i.test(v)}
+  function draw(){
+    root.querySelectorAll("#opNav [data-p]").forEach(function(b){b.setAttribute("aria-current",b.dataset.p===page)});
+    var h="",tray=S.tray,startOk=S.startup&&S.tray;
+    if(page==="general"){
+      h='<h3>General</h3>'
+       +row("Launch Cosmo on system startup","Start when you sign in to Windows.",sw("startup",S.startup,"Launch Cosmo on system startup"))
+       +row("Start minimized in tray","Open without showing the main window.",sw("minstart",S.minstart&&startOk,"Start minimized in tray"),!startOk,S.startup?"Needs the tray icon.":"Needs “Launch Cosmo on system startup”.")
+       +row("Show icon in system tray","Keep an icon near the clock.",sw("tray",S.tray,"Show icon in system tray"))
+       +row("Minimize to tray on close","Closing the window keeps downloads running.",sw("mintray",S.mintray&&tray,"Minimize to tray on close"),!tray,"Needs the tray icon, so you can always get back.");
+    }else if(page==="downloads"){
+      h='<h3>Downloads</h3>'
+       +row("Connections per download","More is not always faster. 8 works well for most.",'<span style="display:flex;align-items:center;gap:10px"><input type="range" min="1" max="16" value="'+S.threads+'" id="opThr" aria-label="Connections per download"><b id="opThv" class="num" style="width:20px;text-align:right">'+S.threads+'</b></span>')
+       +row("Speed limit","0 means unlimited.",'<span style="display:flex;gap:6px"><input class="field" type="number" min="0" id="opSpd" value="'+S.speed+'" style="width:84px" aria-label="Speed limit"><select class="field" id="opUnit" aria-label="Unit" style="width:84px"><option'+(S.unit==="KB/s"?' selected':'')+'>KB/s</option><option'+(S.unit==="MB/s"?' selected':'')+'>MB/s</option></select></span>')
+       +row("Default save folder","Empty uses a folder per category.",'<span style="display:flex;gap:6px"><input class="field" type="text" id="opFold" value="'+esc(S.folder)+'" placeholder="Category default" style="width:150px" aria-label="Default save folder"><button class="btn outline" type="button">Browse</button></span>')
+       +row("Catch links from clipboard","Offer to download when you copy a link.",sw("clip",S.clip,"Catch links from clipboard"));
+    }else if(page==="notif"){
+      h='<h3>Notifications</h3>'
+       +row("Desktop notifications","Show a message when a download finishes or fails.",sw("notif",S.notif,"Desktop notifications"))
+       +row("Show the download window","Keep the progress and complete window open.",sw("cwin",S.cwin,"Show the download window"))
+       +row("Open the main window when a download starts","Off keeps only the download window.",sw("openmain",S.openmain,"Open the main window when a download starts"))
+       +((!S.notif&&!S.cwin)?'<div class="opwarn">With both turned off, you won’t see anything when a download finishes.</div>':'');
+    }else{
+      var ok=proxyOk(S.proxy);
+      h='<h3>Network</h3>'+row("Proxy","http://, https:// or socks5://  ·  empty = direct connection",'<input class="field" type="text" id="opPrx" value="'+esc(S.proxy)+'" placeholder="Direct connection" style="width:210px" aria-label="Proxy URL"'+(ok?'':' aria-invalid="true"')+'>')
+       +(ok?'':'<div class="operr" id="opErr">Enter a valid address, for example http://127.0.0.1:8080</div>');
+    }
+    g("opPg").innerHTML=h;
+    g("opSave").setAttribute("aria-disabled",String(!proxyOk(S.proxy)));
+  }
+  g("opPg").addEventListener("click",function(e){
+    var b=e.target.closest("[data-k]");if(!b||b.closest(".off"))return;
+    S[b.dataset.k]=b.getAttribute("aria-checked")!=="true";draw();
+  });
+  g("opPg").addEventListener("input",function(e){
+    var t=e.target;
+    if(t.id==="opThr"){S.threads=+t.value;g("opThv").textContent=t.value}
+    else if(t.id==="opSpd")S.speed=Math.max(0,+t.value||0);
+    else if(t.id==="opFold")S.folder=t.value;
+    else if(t.id==="opPrx"){
+      S.proxy=t.value.trim();var ok=proxyOk(S.proxy),er=g("opErr");
+      g("opSave").setAttribute("aria-disabled",String(!ok));
+      if(ok){t.removeAttribute("aria-invalid");if(er)er.remove()}
+      else{t.setAttribute("aria-invalid","true");if(!er){var d=document.createElement("div");d.className="operr";d.id="opErr";d.textContent="Enter a valid address, for example http://127.0.0.1:8080";g("opPg").appendChild(d)}}
+    }
+  });
+  g("opPg").addEventListener("change",function(e){if(e.target.id==="opUnit")S.unit=e.target.value});
+  g("opNav").addEventListener("click",function(e){var b=e.target.closest("[data-p]");if(b){page=b.dataset.p;draw()}});
+  function cancel(){S=JSON.parse(JSON.stringify(saved));draw()}
+  g("opReset").onclick=function(){S=JSON.parse(JSON.stringify(DEF));draw()};
+  g("opCancel").onclick=cancel;
+  g("opSave").onclick=function(){
+    if(!proxyOk(S.proxy))return;
+    saved=JSON.parse(JSON.stringify(S));var b=g("opSave");b.textContent="Saved ✓";setTimeout(function(){b.textContent="Save"},1200);
+  };
+  root.addEventListener("keydown",function(e){if(e.key==="Escape")cancel()});
+  draw();
+})();
 
 /* theme: same data-theme logic as the reference file */
 function isDark(){var r=document.documentElement,t=r.getAttribute("data-theme");return t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches)}

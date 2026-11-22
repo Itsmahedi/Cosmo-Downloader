@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "rustget-core"
 version.workspace = true
 edition.workspace = true
@@ -22,6 +22,8 @@ rusqlite = { workspace = true }
 directories = { workspace = true }
 uuid = { workspace = true }
 arboard = { workspace = true }
+socket2 = { workspace = true }
+librqbit = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

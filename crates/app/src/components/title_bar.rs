@@ -10,7 +10,7 @@ pub struct TitleBarAction {
 
 pub fn render_title_bar(
     ui: &mut egui::Ui,
-    ctx: &egui::Context,
+    _ctx: &egui::Context,
     pal: &ThemeColors,
     logo_tex: Option<&TextureHandle>,
     title: &str,
@@ -22,7 +22,7 @@ pub fn render_title_bar(
     };
 
     let bar_rect = ui.allocate_space(Vec2::new(ui.available_width(), 36.0)).1;
-    let is_dialog = title == "Download File Info" || title == "New download";
+    let is_dialog = title != crate::app::APP_TITLE && (title == "Download File Info" || title == "New download" || title.contains("Info"));
     let rounding = if is_dialog {
         eframe::egui::Rounding { nw: shapes::R.nw, ne: shapes::R.ne, sw: 0.0, se: 0.0 }
     } else {
@@ -36,7 +36,7 @@ pub fn render_title_bar(
     );
 
     let buttons: &[&str] = if is_dialog {
-        &["close"]
+        &["min", "close"]
     } else {
         &["min", "max", "close"]
     };
@@ -46,8 +46,10 @@ pub fn render_title_bar(
         Pos2::new((bar_rect.right() - wc_width).max(bar_rect.left()), bar_rect.bottom()),
     );
     let drag_resp = ui.interact(drag_rect, ui.id().with((title, "title_drag")), egui::Sense::click_and_drag());
-    if !is_dialog && drag_resp.drag_started() {
-        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    if drag_resp.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        #[cfg(windows)]
+        crate::platform::drag_window_by_title(title);
     }
     if !is_dialog && drag_resp.double_clicked() {
         action.toggle_maximize = true;

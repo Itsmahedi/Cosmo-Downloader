@@ -191,6 +191,7 @@ fn test_1_app_not_running_click_video_download_button_once() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     app.show_download_dialog(req, "extension");
@@ -217,6 +218,7 @@ fn test_2_app_already_running_click_once() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     app.show_download_dialog(req, "extension");
@@ -240,6 +242,7 @@ fn test_3_click_button_3_times_quickly_still_one_dialog() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
     let req2 = DownloadDialogRequest {
         url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RD123&index=2".to_string(),
@@ -248,6 +251,7 @@ fn test_3_click_button_3_times_quickly_still_one_dialog() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
     let req3 = DownloadDialogRequest {
         url: "https://youtu.be/dQw4w9WgXcQ?si=abc&t=10s".to_string(),
@@ -256,6 +260,7 @@ fn test_3_click_button_3_times_quickly_still_one_dialog() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     // Click 1
@@ -296,6 +301,7 @@ fn test_4_navigate_between_5_different_youtube_videos_click_button_once() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     app.show_download_dialog(final_req, "extension");
@@ -316,6 +322,7 @@ fn test_5_open_two_different_videos_cascaded_24px() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     let req_b = DownloadDialogRequest {
@@ -325,6 +332,7 @@ fn test_5_open_two_different_videos_cascaded_24px() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     app.show_download_dialog(req_a, "extension");
@@ -357,6 +365,7 @@ fn test_6_start_download_then_click_button_again_suppressed() {
         referer: None,
         user_agent: None,
         num_segments: None,
+        ..Default::default()
     };
 
     // 1. Open dialog
@@ -387,6 +396,7 @@ fn test_queue_overflow_more_than_5_dialogs() {
             referer: None,
             user_agent: None,
             num_segments: None,
+            ..Default::default()
         };
         app.show_download_dialog(req, "extension");
     }

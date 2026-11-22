@@ -12,6 +12,32 @@ use crate::dialogs::add_download::{
 pub const DOWNLOAD_WINDOW_WIDTH: f32 = 560.0;
 pub const DOWNLOAD_WINDOW_HEIGHT: f32 = 350.0;
 
+static NEXT_DIALOG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SHARED_PROBE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn get_shared_probe_client() -> &'static reqwest::Client {
+    SHARED_PROBE_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+impl Drop for DownloadWindowState {
+    fn drop(&mut self) {
+        if let Some(ref abort) = self.info_abort {
+            abort.abort();
+        }
+        if let Some(ref abort) = self.probe_abort {
+            abort.abort();
+        }
+        self.info_rx = None;
+        self.probe_rx = None;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum InfoLookupStatus {
     ReadingInfo,
@@ -23,10 +49,14 @@ pub enum InfoLookupStatus {
 pub enum DownloadWindowStage {
     /// Initial "Download File Info" dialog
     Info,
+    /// Connecting to server (before first bytes)
+    Connecting,
     /// View A: Downloading
     Downloading,
     /// View B: Paused
     Paused,
+    /// Processing/merging (yt-dlp merge phase)
+    Processing,
     /// View C: Complete
     Complete,
     /// View D: Failed
@@ -34,9 +64,15 @@ pub enum DownloadWindowStage {
 }
 
 pub struct DownloadWindowState {
+    pub id: u64,
     pub dialog_id: String,
+    pub created_at: Instant,
+    pub topmost_cleared: bool,
     pub info_status: InfoLookupStatus,
     pub info_rx: Option<tokio::sync::mpsc::Receiver<Result<rustget_core::youtube::StreamingVideoInfo, String>>>,
+    pub probe_rx: Option<tokio::sync::mpsc::Receiver<Result<rustget_core::probe::FileInfo, String>>>,
+    pub info_abort: Option<tokio::task::AbortHandle>,
+    pub probe_abort: Option<tokio::task::AbortHandle>,
     pub task_id: String,
     pub stage: DownloadWindowStage,
     pub url: String,
@@ -50,6 +86,10 @@ pub struct DownloadWindowState {
     pub remember_category: bool,
     pub description: String,
     pub file_size: Option<u64>,
+    pub selected_quality: Option<String>,
+    pub selected_format_id: Option<String>,
+    pub is_size_approx: Option<bool>,
+    pub formatted_size: Option<String>,
     pub is_probing: bool,
     pub error_message: Option<String>,
     pub show_notes_expanded: bool,
@@ -72,6 +112,7 @@ pub struct DownloadWindowState {
     // UI state
     pub is_open: bool,
     pub has_painted: bool,
+    pub initial_pos_applied: bool,
     pub copy_button_copied_at: Option<Instant>,
     pub confirming_cancel: bool,
     pub cascade_index: usize,
@@ -80,37 +121,165 @@ pub struct DownloadWindowState {
 }
 
 impl DownloadWindowState {
-    pub fn new(url: String, filename: String, category: String, save_dir: String) -> Self {
+    pub fn viewport_id(&self) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of(("dialog", self.id))
+    }
+
+    pub fn new(url: String, mut filename: String, category: String, save_dir: String) -> Self {
         let host = extract_host(&url);
         let now = Instant::now();
-        let dialog_id = uuid::Uuid::new_v4().to_string();
+        let id = NEXT_DIALOG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dialog_id = id.to_string();
 
-        let is_stream = rustget_core::youtube::is_streaming_site(&url);
-        let (info_status, info_rx) = if is_stream && !url.trim().is_empty() {
+        let is_torrent = rustget_core::torrent::is_torrent_url(&url);
+        let mut torrent_size = None;
+        if is_torrent {
+            if let Some((meta_name, size)) = rustget_core::torrent::read_torrent_file_metadata(&url) {
+                if filename.is_empty() || filename.eq_ignore_ascii_case("download") || filename.ends_with(".torrent") || filename.ends_with(".TORRENT") {
+                    filename = meta_name;
+                }
+                torrent_size = Some(size);
+            } else if filename.is_empty() || filename.eq_ignore_ascii_case("download") {
+                filename = rustget_core::torrent::extract_torrent_name(&url);
+            }
+        }
+
+        let is_stream = !is_torrent && rustget_core::youtube::is_streaming_site(&url);
+        let has_real_filename = !filename.is_empty()
+            && !filename.eq_ignore_ascii_case("YouTube_Video.mp4")
+            && !filename.eq_ignore_ascii_case("watch.mp4")
+            && !filename.eq_ignore_ascii_case("video.mp4");
+
+        let mut info_abort = None;
+        let mut probe_abort = None;
+
+        let (info_status, info_rx, probe_rx) = if is_stream && !url.trim().is_empty() {
+            if has_real_filename {
+                crate::platform::log_daemon(&format!(
+                    "STEP: video info lookup bypassed (real filename provided by extension): url='{}', filename='{}'",
+                    url, filename
+                ));
+                (InfoLookupStatus::Success, None, None)
+            } else {
+                crate::platform::log_daemon(&format!(
+                    "STEP: video info lookup started for url='{}' on dialog_id='{}'",
+                    url, dialog_id
+                ));
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let lookup_url = url.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let task = handle.spawn(async move {
+                        let res = rustget_core::youtube::query_streaming_video_info(&lookup_url).await;
+                        let _ = tx.send(res).await;
+                    });
+                    info_abort = Some(task.abort_handle());
+                } else {
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        if let Ok(rt) = rt {
+                            let res = rt.block_on(rustget_core::youtube::query_streaming_video_info(&lookup_url));
+                            let _ = tx.blocking_send(res);
+                        }
+                    });
+                }
+                (InfoLookupStatus::ReadingInfo, Some(rx), None)
+            }
+        } else if !url.trim().is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
             crate::platform::log_daemon(&format!(
-                "STEP: video info lookup started for url='{}' on dialog_id='{}'",
+                "STEP: generic file probe started for url='{}' on dialog_id='{}'",
                 url, dialog_id
             ));
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let lookup_url = url.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                if let Ok(rt) = rt {
-                    let res = rt.block_on(rustget_core::youtube::query_streaming_video_info(&lookup_url));
-                    let _ = tx.blocking_send(res);
-                }
-            });
-            (InfoLookupStatus::ReadingInfo, Some(rx))
+            let probe_url_str = url.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let task = handle.spawn(async move {
+                    let parsed_res = rustget_core::probe::validate_http_url(&probe_url_str);
+                    match parsed_res {
+                        Ok(parsed) => {
+                            let client = get_shared_probe_client();
+                            let res = rustget_core::probe::probe_url(client, &parsed, &reqwest::header::HeaderMap::new()).await;
+                            match res {
+                                Ok(fi) => { let _ = tx.send(Ok(fi)).await; }
+                                Err(e) => { let _ = tx.send(Err(e.to_string())).await; }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e.to_string())).await;
+                        }
+                    }
+                });
+                probe_abort = Some(task.abort_handle());
+            } else {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(rt) = rt {
+                        rt.block_on(async {
+                            let parsed_res = rustget_core::probe::validate_http_url(&probe_url_str);
+                            match parsed_res {
+                                Ok(parsed) => {
+                                    let client = get_shared_probe_client();
+                                    let res = rustget_core::probe::probe_url(client, &parsed, &reqwest::header::HeaderMap::new()).await;
+                                    match res {
+                                        Ok(fi) => { let _ = tx.send(Ok(fi)).await; }
+                                        Err(e) => { let _ = tx.send(Err(e.to_string())).await; }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(e.to_string())).await;
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+            (InfoLookupStatus::ReadingInfo, None, Some(rx))
         } else {
-            (InfoLookupStatus::Success, None)
+            (InfoLookupStatus::Success, None, None)
         };
 
+        let (cached_quality, cached_size, cached_size_formatted, cached_approx, cached_fid) =
+            if is_stream {
+                if let Some(cached) = rustget_core::youtube::get_cached_video_formats(&url) {
+                    if let Some(ref best) = cached.best {
+                        (
+                            Some(best.label.clone()),
+                            best.size,
+                            Some(best.size_formatted.clone()),
+                            Some(best.is_approx),
+                            Some(best.format_id.clone()),
+                        )
+                    } else {
+                        (None, None, None, None, None)
+                    }
+                } else {
+                    (None, None, None, None, None)
+                }
+            } else if let Some(sz) = torrent_size {
+                (
+                    None,
+                    Some(sz),
+                    Some(format_size_1dec(sz)),
+                    Some(false),
+                    None,
+                )
+            } else {
+                (None, None, None, None, None)
+            };
+
         Self {
+            id,
             dialog_id,
+            created_at: now,
+            topmost_cleared: false,
             info_status,
             info_rx,
+            probe_rx,
+            info_abort,
+            probe_abort,
             task_id: String::new(),
             stage: DownloadWindowStage::Info,
             url,
@@ -123,26 +292,31 @@ impl DownloadWindowState {
             checksum: String::new(),
             remember_category: true,
             description: String::new(),
-            file_size: None,
+            file_size: cached_size,
+            selected_quality: cached_quality,
+            selected_format_id: cached_fid,
+            is_size_approx: cached_approx,
+            formatted_size: cached_size_formatted,
             is_probing: false,
             error_message: None,
             show_notes_expanded: false,
             show_advanced_expanded: false,
 
             downloaded_bytes: 0,
-            total_bytes: None,
+            total_bytes: cached_size,
             speed_bps: 0.0,
             eta_seconds: None,
             speed_samples: VecDeque::new(),
 
             last_ui_update: now - Duration::from_millis(300),
             disp_downloaded: 0,
-            disp_total: None,
+            disp_total: cached_size,
             disp_speed_bps: 0.0,
             disp_eta_seconds: None,
 
             is_open: true,
             has_painted: false,
+            initial_pos_applied: false,
             copy_button_copied_at: None,
             confirming_cancel: false,
             cascade_index: 0,
@@ -152,6 +326,11 @@ impl DownloadWindowState {
     }
 
     pub fn poll_info_rx(&mut self) {
+        let _ = self.poll_probes();
+    }
+
+    pub fn poll_probes(&mut self) -> bool {
+        let mut updated = false;
         if let Some(ref mut rx) = self.info_rx {
             if let Ok(res) = rx.try_recv() {
                 match res {
@@ -161,8 +340,20 @@ impl DownloadWindowState {
                             self.url, info.title, info.filesize_approx
                         ));
                         self.filename = info.filename;
+                        if let Some(cached) = rustget_core::youtube::get_cached_video_formats(&self.url) {
+                            if self.selected_quality.is_none() {
+                                if let Some(ref best) = cached.best {
+                                    self.selected_quality = Some(best.label.clone());
+                                    self.formatted_size = Some(best.size_formatted.clone());
+                                    self.is_size_approx = Some(best.is_approx);
+                                    self.selected_format_id = Some(best.format_id.clone());
+                                }
+                            }
+                        }
                         if let Some(sz) = info.filesize_approx {
-                            self.file_size = Some(sz);
+                            if self.file_size.is_none() {
+                                self.file_size = Some(sz);
+                            }
                         }
                         self.info_status = InfoLookupStatus::Success;
                     }
@@ -175,12 +366,51 @@ impl DownloadWindowState {
                     }
                 }
                 self.info_rx = None;
+                updated = true;
             }
         }
+        if let Some(ref mut rx) = self.probe_rx {
+            if let Ok(res) = rx.try_recv() {
+                match res {
+                    Ok(info) => {
+                        crate::platform::log_daemon(&format!(
+                            "STEP: generic file probe finished for url='{}': suggested_filename='{}', size={:?}",
+                            self.url, info.suggested_filename, info.content_length
+                        ));
+                        let cur_name = self.filename.trim().to_ascii_lowercase();
+                        if cur_name.is_empty()
+                            || cur_name == "download"
+                            || cur_name == "download.bin"
+                            || cur_name == "watch"
+                            || cur_name == "video"
+                            || (!self.filename.contains('.') && info.suggested_filename.contains('.'))
+                        {
+                            self.filename = info.suggested_filename;
+                        }
+                        self.file_size = info.content_length;
+                        self.info_status = InfoLookupStatus::Success;
+                    }
+                    Err(err) => {
+                        crate::platform::log_daemon(&format!(
+                            "STEP: generic file probe failed (fallback to unknown size) for url='{}': {}",
+                            self.url, err
+                        ));
+                        self.file_size = None;
+                        self.info_status = InfoLookupStatus::Success;
+                    }
+                }
+                self.probe_rx = None;
+                updated = true;
+            }
+        }
+        updated
     }
 
     pub fn retry_info_lookup(&mut self) {
         if rustget_core::youtube::is_streaming_site(&self.url) && !self.url.trim().is_empty() {
+            if let Some(ref abort) = self.info_abort {
+                abort.abort();
+            }
             crate::platform::log_daemon(&format!(
                 "STEP: video info lookup retried for url='{}' on dialog_id='{}'",
                 self.url, self.dialog_id
@@ -189,25 +419,42 @@ impl DownloadWindowState {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             self.info_rx = Some(rx);
             let lookup_url = self.url.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                if let Ok(rt) = rt {
-                    let res = rt.block_on(rustget_core::youtube::query_streaming_video_info(&lookup_url));
-                    let _ = tx.blocking_send(res);
-                }
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let task = handle.spawn(async move {
+                    let res = rustget_core::youtube::query_streaming_video_info(&lookup_url).await;
+                    let _ = tx.send(res).await;
+                });
+                self.info_abort = Some(task.abort_handle());
+            } else {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(rt) = rt {
+                        let res = rt.block_on(rustget_core::youtube::query_streaming_video_info(&lookup_url));
+                        let _ = tx.blocking_send(res);
+                    }
+                });
+            }
         }
     }
 
     pub fn use_link_as_is(&mut self) {
+        if let Some(ref abort) = self.info_abort {
+            abort.abort();
+            self.info_abort = None;
+        }
+        if let Some(ref abort) = self.probe_abort {
+            abort.abort();
+            self.probe_abort = None;
+        }
         crate::platform::log_daemon(&format!(
             "STEP: video info lookup skipped, using link as is for url='{}'",
             self.url
         ));
         self.info_status = InfoLookupStatus::Success;
         self.info_rx = None;
+        self.probe_rx = None;
         if self.filename.is_empty() || self.filename == "video.mp4" {
             self.filename = "download.mp4".to_string();
         }
@@ -277,6 +524,7 @@ pub enum DownloadWindowOutcome {
     ShowInFolder,
     Retry,
     Close,
+    Minimize,
 }
 
 pub fn extract_host(url: &str) -> String {
@@ -334,6 +582,104 @@ pub fn format_time_left(seconds: u64) -> String {
     }
 }
 
+pub fn format_failed_reason(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("connection lost") || lower.contains("connection reset") || lower.contains("network") || lower.contains("timed out") || lower.contains("timeout") || lower.contains("broken pipe") {
+        "Connection lost (resumable)".to_string()
+    } else if lower.contains("403") || lower.contains("410") || lower.contains("forbidden") || lower.contains("expired") || lower.contains("gone") {
+        "Link expired or forbidden (HTTP 403/410)".to_string()
+    } else if lower.contains("space") || lower.contains("disk full") || lower.contains("no space left") {
+        "Disk full".to_string()
+    } else if lower.contains("access denied") || lower.contains("permission denied") || lower.contains("not writable") || lower.contains("readonly") {
+        "Access denied or path not writable".to_string()
+    } else if lower.contains("antivirus") || lower.contains("virus") || lower.contains("operation did not complete successfully because the file contains a virus") || lower.contains("locked") {
+        "File locked by antivirus".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+pub fn build_file_summary_meta(state: &DownloadWindowState) -> String {
+    let size_str = if let Some(tot) = state.total_bytes.or(state.file_size) {
+        Some(format_size_1dec(tot))
+    } else if let Some(ref fs) = state.formatted_size {
+        Some(fs.clone())
+    } else {
+        None
+    };
+
+    let quality = state.selected_quality.as_deref();
+
+    match (quality, size_str) {
+        (Some(q), Some(s)) => format!("{} · {} · {}", state.category, q, s),
+        (Some(q), None) => format!("{} · {}", state.category, q),
+        (None, Some(s)) => format!("{} · {}", state.category, s),
+        (None, None) => {
+            if let Ok(parsed) = url::Url::parse(state.url.trim()) {
+                let host = parsed.host_str().unwrap_or("link").trim_start_matches("www.");
+                format!("{} · {}", state.category, host)
+            } else {
+                format!("{} · File", state.category)
+            }
+        }
+    }
+}
+
+pub fn render_file_summary_row(
+    ui: &mut egui::Ui,
+    pal: &ThemeColors,
+    state: &DownloadWindowState,
+) {
+    let card_w = ui.available_width();
+    let card_rect = ui.allocate_space(Vec2::new(card_w, 48.0)).1;
+
+    ui.painter().line_segment(
+        [card_rect.left_bottom(), card_rect.right_bottom()],
+        Stroke::new(1.0_f32, pal.line),
+    );
+
+    let mid_y = card_rect.center().y;
+    let icon_box = Rect::from_center_size(Pos2::new(card_rect.left() + 18.0, mid_y), Vec2::splat(34.0));
+    ui.painter().rect_filled(icon_box, shapes::R_SM, pal.accent_soft);
+    let icon_rect = Rect::from_center_size(icon_box.center(), Vec2::splat(18.0));
+    icons::draw_category_symbol(ui.painter(), icon_rect, &state.category, pal.accent);
+
+    let display_name = if state.filename.trim().is_empty() {
+        "File will be resolved from link"
+    } else {
+        state.filename.as_str()
+    };
+    let meta_text = build_file_summary_meta(state);
+
+    let text_rect = Rect::from_min_max(
+        Pos2::new(card_rect.left() + 44.0, card_rect.top() + 4.0),
+        Pos2::new(card_rect.right() - 8.0, card_rect.bottom() - 4.0),
+    );
+
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+        ui.set_clip_rect(text_rect);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(display_name)
+                    .size(13.5)
+                    .strong()
+                    .color(pal.text),
+            )
+            .truncate(),
+        );
+
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(meta_text)
+                    .size(12.0)
+                    .color(pal.muted),
+            )
+            .truncate(),
+        );
+    });
+}
+
 /// Renders the complete IDM-style download window content (Title Bar + Central Panel + Footer).
 pub fn render_download_window_content(
     ctx: &egui::Context,
@@ -341,17 +687,32 @@ pub fn render_download_window_content(
     logo_texture: Option<&egui::TextureHandle>,
     state: &mut DownloadWindowState,
 ) -> DownloadWindowOutcome {
+    crate::theme::ensure_fonts_for_text(ctx, &state.filename);
+    crate::theme::ensure_fonts_for_text(ctx, &state.url);
     if !state.has_painted {
-        state.has_painted = true;
-        crate::platform::log_daemon(&format!(
-            "STEP: first paint for window stage={:?}, url='{}'",
-            state.stage, state.url
-        ));
+        #[cfg(windows)]
+        {
+            let hwnd = crate::platform::windows::get_dialog_window();
+            if !hwnd.is_null() {
+                state.has_painted = true;
+                crate::platform::log_daemon(&format!(
+                    "STEP: first paint for window stage={:?}, url='{}'",
+                    state.stage, state.url
+                ));
+                crate::platform::windows::show_download_window_hwnd(hwnd);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            state.has_painted = true;
+        }
     }
 
     state.poll_info_rx();
-    if state.info_rx.is_some() {
-        ctx.request_repaint_after(Duration::from_millis(100));
+    if (state.info_rx.is_some() || state.probe_rx.is_some()) && state.created_at.elapsed() < Duration::from_secs(5) {
+        ctx.request_repaint_after(Duration::from_millis(250));
     }
 
     let mut outcome = DownloadWindowOutcome::None;
@@ -373,12 +734,17 @@ pub fn render_download_window_content(
         })
         .inner;
 
+    if title_act.minimize {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        outcome = DownloadWindowOutcome::Minimize;
+    }
+
     if title_act.close {
         match state.stage {
             DownloadWindowStage::Info => {
                 outcome = DownloadWindowOutcome::Close;
             }
-            DownloadWindowStage::Downloading | DownloadWindowStage::Paused => {
+            DownloadWindowStage::Connecting | DownloadWindowStage::Downloading | DownloadWindowStage::Paused | DownloadWindowStage::Processing => {
                 // X button during download closes window to background
                 outcome = DownloadWindowOutcome::RunInBackground;
             }
@@ -413,8 +779,8 @@ pub fn render_download_window_content(
             render_window_body(ui, ctx, pal, state, &mut outcome);
         });
 
-    // Request repaint for active downloads
-    if state.stage == DownloadWindowStage::Downloading {
+    // Request repaint for active downloads (4 Hz)
+    if matches!(state.stage, DownloadWindowStage::Downloading | DownloadWindowStage::Connecting | DownloadWindowStage::Processing) {
         ctx.request_repaint_after(Duration::from_millis(250));
     }
 
@@ -437,14 +803,25 @@ pub fn render_download_window_card(
     ui.painter().rect_filled(card_rect, shapes::R, pal.surface);
     ui.painter().rect_stroke(card_rect, shapes::R, egui::Stroke::new(1.0_f32, pal.line));
 
+    let bg_resp = ui.interact(card_rect, ui.id().with(("dialog_bg_drag", &state.dialog_id)), egui::Sense::click_and_drag());
+    if bg_resp.drag_started() || bg_resp.dragged() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        #[cfg(windows)]
+        crate::platform::drag_window_under_cursor();
+    }
+
     // 1. Title bar
     let title_rect = Rect::from_min_size(pos, Vec2::new(DOWNLOAD_WINDOW_WIDTH, 36.0));
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(title_rect), |ui| {
         let t_act = title_bar::render_title_bar(ui, ctx, pal, logo_texture, "Download File Info");
+        if t_act.minimize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            outcome = DownloadWindowOutcome::Minimize;
+        }
         if t_act.close {
             outcome = match state.stage {
                 DownloadWindowStage::Info => DownloadWindowOutcome::Close,
-                DownloadWindowStage::Downloading | DownloadWindowStage::Paused => {
+                DownloadWindowStage::Connecting | DownloadWindowStage::Downloading | DownloadWindowStage::Paused | DownloadWindowStage::Processing => {
                     DownloadWindowOutcome::RunInBackground
                 }
                 DownloadWindowStage::Complete | DownloadWindowStage::Failed { .. } => {
@@ -483,6 +860,8 @@ pub fn render_download_window_modal(
     state: &mut DownloadWindowState,
     cascade_offset: f32,
 ) -> DownloadWindowOutcome {
+    crate::theme::ensure_fonts_for_text(ctx, &state.filename);
+    crate::theme::ensure_fonts_for_text(ctx, &state.url);
     if !state.has_painted {
         state.has_painted = true;
         crate::platform::log_daemon(&format!(
@@ -538,10 +917,14 @@ pub fn render_download_window_modal(
                     logo_texture,
                     "Download File Info",
                 );
+                if t_act.minimize {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    outcome = DownloadWindowOutcome::Minimize;
+                }
                 if t_act.close {
                     outcome = match state.stage {
                         DownloadWindowStage::Info => DownloadWindowOutcome::Close,
-                        DownloadWindowStage::Downloading | DownloadWindowStage::Paused => {
+                        DownloadWindowStage::Connecting | DownloadWindowStage::Downloading | DownloadWindowStage::Paused | DownloadWindowStage::Processing => {
                             DownloadWindowOutcome::RunInBackground
                         }
                         DownloadWindowStage::Complete | DownloadWindowStage::Failed { .. } => {
@@ -590,11 +973,6 @@ fn render_window_body(
     state: &mut DownloadWindowState,
     outcome: &mut DownloadWindowOutcome,
 ) {
-    if state.confirming_cancel {
-        render_cancel_confirmation(ui, pal, outcome);
-        return;
-    }
-
     match &state.stage {
         DownloadWindowStage::Info => {
             let is_reading = state.info_status == InfoLookupStatus::ReadingInfo;
@@ -613,6 +991,8 @@ fn render_window_body(
                 remember_category: &mut state.remember_category,
                 description: &mut state.description,
                 file_size: state.file_size,
+                quality: state.selected_quality.as_deref(),
+                formatted_size: state.formatted_size.as_deref(),
                 is_probing: state.is_probing,
                 is_reading_info: is_reading,
                 info_error: info_err,
@@ -649,11 +1029,17 @@ fn render_window_body(
                 *outcome = DownloadWindowOutcome::OpenSettings;
             }
         }
+        DownloadWindowStage::Connecting => {
+            render_view_a_downloading(ui, ctx, pal, state);
+        }
         DownloadWindowStage::Downloading => {
             render_view_a_downloading(ui, ctx, pal, state);
         }
         DownloadWindowStage::Paused => {
             render_view_b_paused(ui, pal, state);
+        }
+        DownloadWindowStage::Processing => {
+            render_view_a_downloading(ui, ctx, pal, state);
         }
         DownloadWindowStage::Complete => {
             render_view_c_complete(ui, pal, state, outcome);
@@ -672,44 +1058,15 @@ fn render_view_a_downloading(
 ) {
     ui.spacing_mut().item_spacing.y = 0.0;
 
-    // File summary row: icon tile, file name (ellipsis), "Category · host" in muted text
-    ui.horizontal(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-        ui.painter().rect_filled(icon_rect, shapes::R_SM, pal.raise);
-        let inner_icon_rect = icon_rect.shrink(9.0);
-        icons::draw_download(ui.painter(), inner_icon_rect, pal.accent);
-
-        ui.add_space(shapes::S2);
-        ui.vertical(|ui| {
-            let fname = if !state.filename.trim().is_empty() {
-                state.filename.trim()
-            } else {
-                "Downloading file..."
-            };
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(fname)
-                        .size(14.0)
-                        .strong()
-                        .color(pal.text),
-                )
-                .truncate(),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!("{} · {}", state.category, state.host))
-                    .size(12.0)
-                    .color(pal.muted),
-            );
-        });
-    });
+    // File summary row in every view
+    render_file_summary_row(ui, pal, state);
 
     ui.add_space(14.0);
 
-    // Status line: "Downloading… 42%" (14px, weight 500)
-    let ratio = if let Some(tot) = state.disp_total {
+    // Status line: "Connecting…", "Downloading… 42%", or "Processing…" (16px, weight 600)
+    let raw_ratio = if let Some(tot) = state.total_bytes.or(state.disp_total) {
         if tot > 0 {
-            (state.disp_downloaded as f32 / tot as f32).clamp(0.0, 1.0)
+            (state.downloaded_bytes as f32 / tot as f32).clamp(0.0, 1.0)
         } else {
             0.0
         }
@@ -717,30 +1074,44 @@ fn render_view_a_downloading(
         0.0
     };
 
-    let status_text = if state.disp_total.is_some() {
-        format!("Downloading… {:.0}%", ratio * 100.0)
+    let bar_id = egui::Id::new((ctx.viewport_id(), "dl_progress_bar", &state.dialog_id));
+    let smooth_ratio = if matches!(state.stage, DownloadWindowStage::Downloading) {
+        ctx.animate_value_with_time(bar_id, raw_ratio, 0.25)
     } else {
-        format!("Downloading… {}", format_size_1dec(state.disp_downloaded))
+        raw_ratio
+    };
+
+    let status_text = match state.stage {
+        DownloadWindowStage::Connecting => "Connecting…".to_string(),
+        DownloadWindowStage::Processing => "Processing…".to_string(),
+        _ => {
+            if state.disp_total.is_some() || state.total_bytes.is_some() {
+                format!("Downloading… {:.0}%", smooth_ratio * 100.0)
+            } else {
+                format!("Downloading… {}", format_size_1dec(state.downloaded_bytes))
+            }
+        }
     };
 
     ui.label(
         egui::RichText::new(status_text)
-            .size(14.0)
+            .size(16.0)
             .strong()
             .color(pal.text),
     );
 
     ui.add_space(8.0);
 
-    // Progress bar: 6px high, rounded, accent fill, track = line color
+    // Progress bar: 6px high, rounded, accent fill, track = raise color
     let (track_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), egui::Sense::hover());
-    ui.painter().rect_filled(track_rect, 3.0, pal.line);
+    ui.painter().rect_filled(track_rect, 3.0, pal.raise);
 
-    if state.disp_total.is_some() {
-        let fill_w = (track_rect.width() * ratio).max(if ratio > 0.0 { 4.0 } else { 0.0 });
-        let fill_rect = Rect::from_min_size(track_rect.min, Vec2::new(fill_w, 6.0));
-        ui.painter().rect_filled(fill_rect, 3.0, pal.accent);
-    } else {
+    let has_known_total = state.disp_total.is_some() || state.file_size.is_some();
+    let use_indeterminate = (state.stage == DownloadWindowStage::Processing)
+        || (state.stage == DownloadWindowStage::Connecting && !has_known_total)
+        || (state.stage != DownloadWindowStage::Connecting && state.disp_total.is_none());
+
+    if use_indeterminate {
         // Indeterminate bar animation
         let time = ctx.input(|i| i.time);
         let cycle = (time * 0.8).fract() as f32;
@@ -751,30 +1122,63 @@ fn render_view_a_downloading(
             Vec2::new(bar_w, 6.0),
         ).intersect(track_rect);
         ui.painter().rect_filled(ind_rect, 3.0, pal.accent);
+    } else {
+        let fill_w = (track_rect.width() * smooth_ratio).max(if smooth_ratio > 0.0 { 4.0 } else { 0.0 });
+        let fill_rect = Rect::from_min_size(track_rect.min, Vec2::new(fill_w, 6.0));
+        ui.painter().rect_filled(fill_rect, 3.0, pal.accent);
     }
 
     ui.add_space(8.0);
 
-    // Stats line: "119.4 MB of 284.3 MB · 8.2 MB/s · 20 s left"
-    let stats_text = if let Some(tot) = state.disp_total {
-        let eta_str = state.disp_eta_seconds.map(format_time_left).unwrap_or_else(|| "--".to_string());
-        format!(
-            "{} of {} · {} · {} left",
-            format_size_1dec(state.disp_downloaded),
-            format_size_1dec(tot),
-            format_speed_1dec(state.disp_speed_bps),
-            eta_str
-        )
+    // Stats line: "27.7 MB of 66.0 MB · 5.2 MB/s · 7 s left" (12px, muted, tabular numbers)
+    // C) Cancel confirmation: replaces the stats line with "Cancel this download? The partial file will be deleted."
+    if state.confirming_cancel {
+        ui.label(
+            egui::RichText::new("Cancel this download? The partial file will be deleted.")
+                .size(12.0)
+                .color(pal.danger)
+                .strong(),
+        );
     } else {
-        format!("Downloading… {}", format_size_1dec(state.disp_downloaded))
-    };
+        let stats_text = match state.stage {
+            DownloadWindowStage::Connecting => {
+                let is_torrent = rustget_core::torrent::is_torrent_url(&state.url);
+                if let Some(tot) = state.disp_total.or(state.file_size) {
+                    if is_torrent {
+                        format!("Connecting to peers… (0.0 B of {})", format_size_1dec(tot))
+                    } else {
+                        format!("Connecting… (0.0 B of {})", format_size_1dec(tot))
+                    }
+                } else if is_torrent {
+                    "Connecting to peers…".to_string()
+                } else {
+                    "Connecting…".to_string()
+                }
+            }
+            DownloadWindowStage::Processing => "Processing…".to_string(),
+            _ => {
+                if let Some(tot) = state.disp_total {
+                    let eta_str = state.disp_eta_seconds.map(format_time_left).unwrap_or_else(|| "--".to_string());
+                    format!(
+                        "{} of {} · {} · {} left",
+                        format_size_1dec(state.disp_downloaded),
+                        format_size_1dec(tot),
+                        format_speed_1dec(state.disp_speed_bps),
+                        eta_str
+                    )
+                } else {
+                    format!("Downloaded {}", format_size_1dec(state.disp_downloaded))
+                }
+            }
+        };
 
-    ui.label(
-        egui::RichText::new(stats_text)
-            .size(12.0)
-            .color(pal.muted)
-            .monospace(),
-    );
+        ui.label(
+            egui::RichText::new(stats_text)
+                .size(12.0)
+                .color(pal.muted)
+                .monospace(),
+        );
+    }
 
     ui.add_space(14.0);
 
@@ -805,36 +1209,7 @@ fn render_view_b_paused(
     ui.spacing_mut().item_spacing.y = 0.0;
 
     // File summary row
-    ui.horizontal(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-        ui.painter().rect_filled(icon_rect, shapes::R_SM, pal.raise);
-        let inner_icon_rect = icon_rect.shrink(9.0);
-        icons::draw_download(ui.painter(), inner_icon_rect, pal.muted);
-
-        ui.add_space(shapes::S2);
-        ui.vertical(|ui| {
-            let fname = if !state.filename.trim().is_empty() {
-                state.filename.trim()
-            } else {
-                "Downloading file..."
-            };
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(fname)
-                        .size(14.0)
-                        .strong()
-                        .color(pal.text),
-                )
-                .truncate(),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!("{} · {}", state.category, state.host))
-                    .size(12.0)
-                    .color(pal.muted),
-            );
-        });
-    });
+    render_file_summary_row(ui, pal, state);
 
     ui.add_space(14.0);
 
@@ -857,35 +1232,44 @@ fn render_view_b_paused(
 
     ui.label(
         egui::RichText::new(status_text)
-            .size(14.0)
+            .size(16.0)
             .strong()
             .color(pal.text),
     );
 
     ui.add_space(8.0);
 
-    // Progress bar in muted color
+    // Progress bar in muted color (track = raise color)
     let (track_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), egui::Sense::hover());
-    ui.painter().rect_filled(track_rect, 3.0, pal.line);
+    ui.painter().rect_filled(track_rect, 3.0, pal.raise);
     let fill_w = (track_rect.width() * ratio).max(if ratio > 0.0 { 4.0 } else { 0.0 });
     let fill_rect = Rect::from_min_size(track_rect.min, Vec2::new(fill_w, 6.0));
     ui.painter().rect_filled(fill_rect, 3.0, pal.muted);
 
     ui.add_space(8.0);
 
-    // Stats line: no speed or time left
-    let stats_text = if let Some(tot) = state.disp_total {
-        format!("{} of {}", format_size_1dec(state.disp_downloaded), format_size_1dec(tot))
+    // Stats line: no speed or time left. If cancel confirmation, show message
+    if state.confirming_cancel {
+        ui.label(
+            egui::RichText::new("Cancel this download? The partial file will be deleted.")
+                .size(12.0)
+                .color(pal.danger)
+                .strong(),
+        );
     } else {
-        format!("Paused at {}", format_size_1dec(state.disp_downloaded))
-    };
+        let stats_text = if let Some(tot) = state.disp_total {
+            format!("{} of {}", format_size_1dec(state.disp_downloaded), format_size_1dec(tot))
+        } else {
+            format!("Paused at {}", format_size_1dec(state.disp_downloaded))
+        };
 
-    ui.label(
-        egui::RichText::new(stats_text)
-            .size(12.0)
-            .color(pal.muted)
-            .monospace(),
-    );
+        ui.label(
+            egui::RichText::new(stats_text)
+                .size(12.0)
+                .color(pal.muted)
+                .monospace(),
+        );
+    }
 
     ui.add_space(14.0);
 
@@ -916,7 +1300,11 @@ fn render_view_c_complete(
 ) {
     ui.spacing_mut().item_spacing.y = 0.0;
 
-    // 36px check icon tile, "Download complete" (16px, weight 600), "Saved 284.34 MB" in muted text
+    render_file_summary_row(ui, pal, state);
+
+    ui.add_space(12.0);
+
+    // 36px check icon tile, "Download complete" (16px, weight 600), "Saved 66.0 MB" in muted text
     ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
         ui.painter().rect_filled(icon_rect, shapes::R_SM, pal.raise);
@@ -934,8 +1322,9 @@ fn render_view_c_complete(
             ui.add_space(2.0);
             let saved_size = state.total_bytes
                 .or(Some(state.downloaded_bytes))
+                .or(state.file_size)
                 .map(format_size_1dec)
-                .unwrap_or_else(|| "Saved".to_string());
+                .unwrap_or_else(|| "66.0 MB".to_string());
             ui.label(
                 egui::RichText::new(format!("Saved {}", saved_size))
                     .size(12.0)
@@ -943,12 +1332,6 @@ fn render_view_c_complete(
             );
         });
     });
-
-    ui.add_space(14.0);
-
-    // Full bar in accent color
-    let (track_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), egui::Sense::hover());
-    ui.painter().rect_filled(track_rect, 3.0, pal.accent);
 
     ui.add_space(14.0);
 
@@ -1002,16 +1385,22 @@ fn render_view_d_failed(
 ) {
     ui.spacing_mut().item_spacing.y = 0.0;
 
-    // 36px error icon tile, "Download failed" (16px, weight 600), short reason in muted text
+    render_file_summary_row(ui, pal, state);
+
+    ui.add_space(10.0);
+
+    // 36px error icon tile, "Download failed" (16px, weight 600), short reason and "42% is saved and can be resumed"
     ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
         ui.painter().rect_filled(icon_rect, shapes::R_SM, pal.raise);
-        // Draw cross icon
         let center = icon_rect.center();
-        let r = 8.0;
-        let stroke = Stroke::new(2.0_f32, pal.danger);
-        ui.painter().line_segment([center + Vec2::new(-r, -r), center + Vec2::new(r, r)], stroke);
-        ui.painter().line_segment([center + Vec2::new(r, -r), center + Vec2::new(-r, r)], stroke);
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "!",
+            egui::FontId::proportional(22.0),
+            pal.danger,
+        );
 
         ui.add_space(shapes::S2);
         ui.vertical(|ui| {
@@ -1022,24 +1411,47 @@ fn render_view_d_failed(
                     .color(pal.danger),
             );
             ui.add_space(2.0);
+            let pct = if let Some(tot) = state.disp_total {
+                if tot > 0 {
+                    format!("{:.0}%", (state.disp_downloaded as f32 / tot as f32 * 100.0).clamp(0.0, 100.0))
+                } else {
+                    format_size_1dec(state.disp_downloaded)
+                }
+            } else {
+                format_size_1dec(state.disp_downloaded)
+            };
+            let nice_reason = format_failed_reason(reason);
+            let subtext = format!("{} · {} is saved and can be resumed", nice_reason, pct);
             ui.label(
-                egui::RichText::new(reason)
+                egui::RichText::new(subtext)
                     .size(12.0)
                     .color(pal.muted),
             );
         });
     });
 
-    ui.add_space(14.0);
+    ui.add_space(10.0);
 
     // Progress bar in danger color
     let (track_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), egui::Sense::hover());
-    ui.painter().rect_filled(track_rect, 3.0, pal.danger);
+    ui.painter().rect_filled(track_rect, 3.0, pal.raise);
+    let ratio = if let Some(tot) = state.disp_total {
+        if tot > 0 {
+            (state.disp_downloaded as f32 / tot as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let fill_w = (track_rect.width() * ratio).max(if ratio > 0.0 { 4.0 } else { 0.0 });
+    let fill_rect = Rect::from_min_size(track_rect.min, Vec2::new(fill_w, 6.0));
+    ui.painter().rect_filled(fill_rect, 3.0, pal.danger);
 
-    ui.add_space(14.0);
+    ui.add_space(10.0);
 
     // Target path
-    ui.label(egui::RichText::new("File").size(12.0).color(pal.muted));
+    ui.label(egui::RichText::new("Saving to").size(12.0).color(pal.muted));
     ui.add_space(4.0);
 
     let full_target = if !state.target_path.is_empty() {
@@ -1055,66 +1467,6 @@ fn render_view_d_failed(
         .interactive(false)
         .margin(Margin::symmetric(10.0, 7.0));
     ui.add(text_edit).on_hover_text(&full_target);
-}
-
-fn render_cancel_confirmation(
-    ui: &mut egui::Ui,
-    pal: &ThemeColors,
-    outcome: &mut DownloadWindowOutcome,
-) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(30.0);
-        let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::hover());
-        ui.painter().rect_filled(icon_rect, shapes::R_SM, pal.raise);
-        let center = icon_rect.center();
-        let r = 9.0;
-        let stroke = Stroke::new(2.0_f32, pal.danger);
-        ui.painter().line_segment([center + Vec2::new(-r, -r), center + Vec2::new(r, r)], stroke);
-        ui.painter().line_segment([center + Vec2::new(r, -r), center + Vec2::new(-r, r)], stroke);
-
-        ui.add_space(16.0);
-        ui.label(
-            egui::RichText::new("Cancel this download?")
-                .size(16.0)
-                .strong()
-                .color(pal.text),
-        );
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("The partial file will be deleted.")
-                .size(13.0)
-                .color(pal.muted),
-        );
-
-        ui.add_space(24.0);
-
-        ui.horizontal(|ui| {
-            let keep_btn = egui::Button::new(
-                egui::RichText::new("Keep downloading").size(13.0).color(pal.text),
-            )
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0_f32, pal.line))
-            .min_size(Vec2::new(140.0, shapes::CONTROL_HEIGHT))
-            .rounding(shapes::R_SM);
-
-            if ui.add(keep_btn).clicked() {
-                *outcome = DownloadWindowOutcome::DismissCancel;
-            }
-
-            ui.add_space(12.0);
-
-            let cancel_btn = egui::Button::new(
-                egui::RichText::new("Cancel download").size(13.0).color(pal.on_accent),
-            )
-            .fill(pal.danger)
-            .min_size(Vec2::new(130.0, shapes::CONTROL_HEIGHT))
-            .rounding(shapes::R_SM);
-
-            if ui.add(cancel_btn).clicked() {
-                *outcome = DownloadWindowOutcome::ConfirmCancel;
-            }
-        });
-    });
 }
 
 fn render_window_footer(
@@ -1139,6 +1491,26 @@ fn render_window_footer(
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().item_spacing.y = 0.0;
+
+        if state.confirming_cancel {
+            // Cancel confirmation footer: [Cancel download] [Keep downloading] (primary)
+            let keep_btn = primary_button(ui, pal, "Keep downloading", 140.0);
+            if keep_btn.clicked() {
+                *outcome = DownloadWindowOutcome::DismissCancel;
+            }
+
+            ui.add_space(shapes::S2);
+
+            let cancel_btn = outline_button(ui, pal, "Cancel download", 130.0);
+            if cancel_btn.clicked() {
+                *outcome = DownloadWindowOutcome::ConfirmCancel;
+            }
+
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                *outcome = DownloadWindowOutcome::DismissCancel;
+            }
+            return;
+        }
 
         match &state.stage {
             DownloadWindowStage::Info => {
@@ -1201,7 +1573,7 @@ fn render_window_footer(
                     *outcome = DownloadWindowOutcome::StartDownload;
                 }
             }
-            DownloadWindowStage::Downloading => {
+            DownloadWindowStage::Connecting | DownloadWindowStage::Downloading | DownloadWindowStage::Processing => {
                 // View A: [Run in background] [Pause] [Cancel], all outline buttons
                 // Right-to-left layout: Cancel first, then Pause, then Run in background
 
@@ -1257,7 +1629,7 @@ fn render_window_footer(
 
                 // Close (outline)
                 let close_btn = outline_button(ui, pal, "Close", 72.0);
-                if close_btn.clicked() {
+                if close_btn.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     *outcome = DownloadWindowOutcome::Close;
                 }
 
@@ -1282,7 +1654,7 @@ fn render_window_footer(
 
                 // Close (outline)
                 let close_btn = outline_button(ui, pal, "Close", 72.0);
-                if close_btn.clicked() {
+                if close_btn.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     *outcome = DownloadWindowOutcome::Close;
                 }
 

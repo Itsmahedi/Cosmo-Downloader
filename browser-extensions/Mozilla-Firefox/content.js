@@ -24,15 +24,284 @@ if (typeof window !== "undefined") {
 
 const runtime = typeof browser !== "undefined" ? browser : (typeof chrome !== "undefined" ? chrome : null);
 
-const QUALITIES = [
-  { label: "1080p", meta: "148 MB", format: "1080p", audioOnly: false },
-  { label: "720p", meta: "82 MB", format: "720p", audioOnly: false },
-  { label: "480p", meta: "41 MB", format: "480p", audioOnly: false },
-  { label: "360p", meta: "24 MB", format: "360p", audioOnly: false },
+const DEFAULT_QUALITIES = [
+  { label: "1080p", format: "1080p", audioOnly: false },
+  { label: "720p", format: "720p", audioOnly: false },
+  { label: "480p", format: "480p", audioOnly: false },
+  { label: "360p", format: "360p", audioOnly: false },
   { divider: true },
-  { label: "Audio only", meta: "9 MB", format: "audio", audioOnly: true },
-  { label: "Best available", meta: "Auto", format: "best", audioOnly: false }
+  { label: "Audio only", format: "audio", audioOnly: true },
+  { label: "Best available", format: "best", audioOnly: false }
 ];
+
+let currentVideoUrl = "";
+let currentVideoId = "";
+let currentFormats = null;
+let formatsLoading = false;
+let formatsError = false;
+let formatsRequestId = 0;
+let formatFetchTimeout = null;
+
+function getYouTubeVideoId(urlStr = (typeof window !== "undefined" ? window.location.href : "")) {
+  try {
+    const u = new URL(urlStr);
+    const host = u.hostname.toLowerCase();
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") {
+      if (u.searchParams.has("v")) return u.searchParams.get("v");
+      if (host === "youtu.be") {
+        const parts = u.pathname.split("/").filter(Boolean);
+        if (parts.length > 0) return parts[0];
+      }
+      for (const p of ["/shorts/", "/embed/", "/v/", "/live/"]) {
+        if (u.pathname.startsWith(p)) {
+          const parts = u.pathname.slice(p.length).split("/").filter(Boolean);
+          if (parts.length > 0) return parts[0];
+        }
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
+function getCurrentStreamingUrl() {
+  if (typeof window === "undefined") return "";
+  return normalizeStreamingUrl(window.location.href);
+}
+
+function fetchFormatsForVideo(url) {
+  if (!url) return;
+  const isVideoPage = isYouTubeHost() || url.includes("youtube.com") || url.includes("youtu.be") || url.includes("/watch") || url.includes("/shorts/");
+  if (!isVideoPage) {
+    return;
+  }
+  const reqId = ++formatsRequestId;
+  formatsLoading = true;
+  formatsError = false;
+
+  if (formatFetchTimeout) clearTimeout(formatFetchTimeout);
+  formatFetchTimeout = setTimeout(() => {
+    if (formatsRequestId === reqId && formatsLoading) {
+      formatsLoading = false;
+      formatsError = true;
+      updateAllOpenMenus();
+    }
+  }, 8000);
+
+  if (runtime && runtime.runtime && runtime.runtime.sendMessage) {
+    try {
+      runtime.runtime.sendMessage({ action: "getVideoFormats", url }, (res) => {
+        if (formatsRequestId !== reqId) return; // stale/superseded request
+        if (formatFetchTimeout) clearTimeout(formatFetchTimeout);
+        formatsLoading = false;
+
+        if (res && res.success && res.formats) {
+          currentFormats = res.formats;
+          formatsError = false;
+        } else {
+          formatsError = true;
+        }
+        updateAllOpenMenus();
+      });
+    } catch (_) {
+      if (formatsRequestId === reqId) {
+        formatsLoading = false;
+        formatsError = true;
+        updateAllOpenMenus();
+      }
+    }
+  }
+}
+
+function onVideoUrlChanged() {
+  const newUrl = getCurrentStreamingUrl();
+  const newId = getYouTubeVideoId(newUrl);
+  if (newUrl === currentVideoUrl && newId === currentVideoId) {
+    return;
+  }
+  // Cancel old in-flight request
+  formatsRequestId++;
+  if (formatFetchTimeout) {
+    clearTimeout(formatFetchTimeout);
+    formatFetchTimeout = null;
+  }
+  currentVideoUrl = newUrl;
+  currentVideoId = newId;
+  currentFormats = null;
+  formatsLoading = false;
+  formatsError = false;
+
+  // Clear rows in all attached menus immediately so old sizes are never shown
+  updateAllOpenMenus();
+
+  // If on a video page, start fetching formats for the new video
+  if (newId || newUrl.includes("/watch") || newUrl.includes("/shorts/")) {
+    fetchFormatsForVideo(newUrl);
+  }
+}
+
+function updateAllOpenMenus() {
+  for (const [videoEl, record] of activeAttachedButtons.entries()) {
+    const menu = record.container.querySelector(".cosmo-quality-menu");
+    if (menu) {
+      renderMenuRows(menu, videoEl);
+    }
+  }
+}
+
+function attachItemClickHandler(item, videoEl, menu) {
+  item.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    const format = item.getAttribute("data-format");
+    const qualityOption = item._qualityOption || null;
+    triggerDownload(videoEl, format, qualityOption);
+
+    const container = menu.closest(".cosmo-video-container");
+    const btn = container ? container.querySelector(".cosmo-video-download-btn") : null;
+    const textEl = btn ? btn.querySelector(".cosmo-btn-text") : null;
+    const prevText = textEl ? textEl.textContent : "Download";
+    if (textEl) textEl.textContent = "Sent to CosmoDownloader";
+    if (btn) btn.classList.add("sent");
+
+    if (container) {
+      container.classList.remove("open");
+      container.classList.remove("flip-up");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+    }
+
+    setTimeout(() => {
+      if (textEl) textEl.textContent = prevText;
+      if (btn) btn.classList.remove("sent");
+    }, 2000);
+  });
+}
+
+function renderMenuRows(menu, videoEl) {
+  const itemsContainer = menu.querySelector(".cosmo-menu-items");
+  if (!itemsContainer) return;
+  itemsContainer.innerHTML = "";
+
+  const isLive = currentFormats?.is_live;
+
+  if (currentFormats && Array.isArray(currentFormats.qualities) && currentFormats.qualities.length > 0) {
+    // 1. Video resolutions that actually exist
+    currentFormats.qualities.forEach((q) => {
+      const item = document.createElement("button");
+      item.className = "cosmo-quality-item";
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("data-format", q.format);
+      item._qualityOption = q;
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "quality-name";
+      titleSpan.textContent = q.label;
+
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "meta";
+      metaSpan.textContent = isLive ? "" : (q.size_formatted || "");
+
+      item.appendChild(titleSpan);
+      item.appendChild(metaSpan);
+      attachItemClickHandler(item, videoEl, menu);
+      itemsContainer.appendChild(item);
+    });
+
+    // Divider
+    const hr = document.createElement("hr");
+    itemsContainer.appendChild(hr);
+
+    // 2. Audio only
+    if (currentFormats.audio) {
+      const q = currentFormats.audio;
+      const item = document.createElement("button");
+      item.className = "cosmo-quality-item audio";
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("data-format", "audio");
+      item._qualityOption = q;
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "quality-name";
+      titleSpan.textContent = q.label;
+
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "meta";
+      metaSpan.textContent = isLive ? "" : (q.size_formatted || "");
+
+      item.appendChild(titleSpan);
+      item.appendChild(metaSpan);
+      attachItemClickHandler(item, videoEl, menu);
+      itemsContainer.appendChild(item);
+    }
+
+    // 3. Best available / Auto
+    if (currentFormats.best) {
+      const q = currentFormats.best;
+      const item = document.createElement("button");
+      item.className = "cosmo-quality-item";
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("data-format", "best");
+      item._qualityOption = q;
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "quality-name";
+      titleSpan.textContent = q.label || "Best available";
+
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "meta";
+      metaSpan.textContent = isLive ? "" : (q.size_formatted || "");
+
+      item.appendChild(titleSpan);
+      item.appendChild(metaSpan);
+      attachItemClickHandler(item, videoEl, menu);
+      itemsContainer.appendChild(item);
+    }
+  } else {
+    // Formats not yet loaded or error: show default rows
+    DEFAULT_QUALITIES.forEach((q) => {
+      if (q.divider) {
+        const hr = document.createElement("hr");
+        itemsContainer.appendChild(hr);
+        return;
+      }
+
+      const item = document.createElement("button");
+      item.className = "cosmo-quality-item" + (q.audioOnly ? " audio" : "");
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("data-format", q.format);
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "quality-name";
+      titleSpan.textContent = q.label;
+
+      const metaSpan = document.createElement("span");
+      if (formatsError) {
+        metaSpan.className = "meta";
+        metaSpan.textContent = "";
+      } else {
+        metaSpan.className = "meta loading-placeholder";
+        metaSpan.textContent = "";
+      }
+
+      item.appendChild(titleSpan);
+      item.appendChild(metaSpan);
+      attachItemClickHandler(item, videoEl, menu);
+      itemsContainer.appendChild(item);
+    });
+
+    if (formatsError) {
+      const errLine = document.createElement("div");
+      errLine.className = "cosmo-sizes-unavailable";
+      errLine.textContent = "Sizes unavailable";
+      itemsContainer.appendChild(errLine);
+    }
+  }
+}
 
 let siteExcluded = false;
 function checkSiteExclusion() {
@@ -229,7 +498,7 @@ function attachCosmoDownloadButton(videoEl) {
   btn.appendChild(btnText);
   btn.appendChild(chevSvg);
 
-  // Create Quality Dropdown Menu: 176px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18)
+  // Create Quality Dropdown Menu: min 176px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18)
   const menu = document.createElement("div");
   menu.className = "cosmo-quality-menu";
   menu.setAttribute("role", "listbox");
@@ -247,31 +516,13 @@ function attachCosmoDownloadButton(videoEl) {
   menuHeader.appendChild(mLabel);
   menu.appendChild(menuHeader);
 
-  QUALITIES.forEach((q) => {
-    if (q.divider) {
-      const hr = document.createElement("hr");
-      menu.appendChild(hr);
-      return;
-    }
+  // Dynamic menu items container
+  const itemsContainer = document.createElement("div");
+  itemsContainer.className = "cosmo-menu-items";
+  menu.appendChild(itemsContainer);
 
-    const item = document.createElement("button");
-    item.className = "cosmo-quality-item" + (q.audioOnly ? " audio" : "");
-    item.type = "button";
-    item.setAttribute("role", "option");
-    item.setAttribute("data-format", q.format);
-
-    const titleSpan = document.createElement("span");
-    titleSpan.className = "quality-name";
-    titleSpan.textContent = q.label;
-
-    const metaSpan = document.createElement("span");
-    metaSpan.className = "meta";
-    metaSpan.textContent = q.meta;
-
-    item.appendChild(titleSpan);
-    item.appendChild(metaSpan);
-    menu.appendChild(item);
-  });
+  // Initial population of menu rows
+  renderMenuRows(menu, videoEl);
 
   // Menu Footer: 12px muted, centered
   const menuFooter = document.createElement("div");
@@ -289,9 +540,13 @@ function attachCosmoDownloadButton(videoEl) {
   const openMenu = () => {
     container.classList.add("open");
     btn.setAttribute("aria-expanded", "true");
+    renderMenuRows(menu, videoEl);
+    if (!currentFormats && !formatsLoading) {
+      fetchFormatsForVideo(getCurrentStreamingUrl());
+    }
     try {
       const rect = btn.getBoundingClientRect();
-      const menuHeight = 220;
+      const menuHeight = 240;
       if (rect.bottom + menuHeight > (window.innerHeight || document.documentElement.clientHeight || 900)) {
         container.classList.add("flip-up");
       } else {
@@ -318,31 +573,6 @@ function attachCosmoDownloadButton(videoEl) {
     }
   });
 
-  // Handle Quality Selection
-  menu.querySelectorAll(".cosmo-quality-item").forEach((item) => {
-    item.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-
-      const format = item.getAttribute("data-format");
-      triggerDownload(videoEl, format);
-
-      // Feedback animation
-      const textEl = btn.querySelector(".cosmo-btn-text");
-      const prevText = textEl ? textEl.textContent : "Download";
-      if (textEl) textEl.textContent = "Sent to CosmoDownloader";
-      btn.classList.add("sent");
-
-      closeMenu();
-
-      setTimeout(() => {
-        if (textEl) textEl.textContent = prevText;
-        btn.classList.remove("sent");
-      }, 2000);
-    });
-  });
-
   // Close menu on Escape key
   const onKeyDown = (e) => {
     if (e.key === "Escape" && container.classList.contains("open")) {
@@ -354,8 +584,7 @@ function attachCosmoDownloadButton(videoEl) {
   document.addEventListener("keydown", onKeyDown);
 
   // Keep button solidly visible during user interaction
-  const showBtn = (e) => {
-    if (e) e.stopPropagation();
+  const showBtn = () => {
     btn.style.opacity = "1";
     btn.style.pointerEvents = "auto";
   };
@@ -550,9 +779,9 @@ function normalizeStreamingUrl(rawUrl) {
 
 let lastDownloadTriggered = { url: "", timestamp: 0 };
 
-function triggerDownload(videoEl, format) {
-  let videoUrl = videoEl.src || videoEl.currentSrc || "";
-  if (!videoUrl) {
+function triggerDownload(videoEl, format, qualityOption = null) {
+  let videoUrl = videoEl ? (videoEl.src || videoEl.currentSrc || "") : "";
+  if (!videoUrl && videoEl) {
     const srcEl = videoEl.querySelector ? videoEl.querySelector("source") : null;
     if (srcEl) videoUrl = srcEl.src || "";
   }
@@ -563,13 +792,13 @@ function triggerDownload(videoEl, format) {
   const urlToSend = (isStreaming || !videoUrl || videoUrl.startsWith("blob:")) ? pageUrl : videoUrl;
 
   const now = Date.now();
-  if (lastDownloadTriggered.url === urlToSend && lastDownloadTriggered.format === format && (now - lastDownloadTriggered.timestamp) < 2000) {
-    console.log("[CosmoDownloader] Suppressing duplicate video button trigger within 2s for:", urlToSend);
+  if (lastDownloadTriggered.url === urlToSend && lastDownloadTriggered.format === format && (now - lastDownloadTriggered.timestamp) < 400) {
+    console.log("[CosmoDownloader] Suppressing accidental rapid double click within 400ms for:", urlToSend);
     return;
   }
   lastDownloadTriggered = { url: urlToSend, format: format, timestamp: now };
 
-  const pageTitle = extractVideoTitle();
+  const pageTitle = (currentFormats && currentFormats.title) ? currentFormats.title : extractVideoTitle();
   const ext = format === "audio" ? ".mp3" : ".mp4";
   const safeFilename = sanitizeFilename(pageTitle) + ext;
 
@@ -580,7 +809,11 @@ function triggerDownload(videoEl, format) {
       pageUrl: pageUrl,
       title: pageTitle,
       filename: safeFilename,
-      quality: format
+      quality: format,
+      size: qualityOption?.size || null,
+      sizeFormatted: qualityOption?.size_formatted || null,
+      isApprox: qualityOption?.is_approx ?? null,
+      formatId: qualityOption?.format_id || null,
     });
   } catch (err) {
     console.warn("[CosmoDownloader] Send message failed:", err);
@@ -592,6 +825,12 @@ function triggerDownload(videoEl, format) {
  */
 function scanVideos() {
   if (siteExcluded) return;
+
+  const curUrl = getCurrentStreamingUrl();
+  if (curUrl && curUrl !== currentVideoUrl) {
+    onVideoUrlChanged();
+  }
+
   // 1. Audit active attachments: remove if video is detached or no longer qualifies
   for (const [videoEl, record] of activeAttachedButtons.entries()) {
     if (!videoEl.isConnected || isMiniPreview(videoEl)) {
@@ -633,6 +872,11 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
 
   // Initial scan + exclusion check
   checkSiteExclusion();
+  currentVideoUrl = getCurrentStreamingUrl();
+  currentVideoId = getYouTubeVideoId(currentVideoUrl);
+  if (currentVideoId || currentVideoUrl.includes("/watch") || currentVideoUrl.includes("/shorts/")) {
+    fetchFormatsForVideo(currentVideoUrl);
+  }
   scanVideos();
   setInterval(() => {
     if (!siteExcluded && (isYouTubeHost() || document.querySelector("video") !== null)) {
@@ -650,12 +894,90 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
 
   // SPA navigation hooks
   window.addEventListener("yt-navigate-finish", () => {
+    onVideoUrlChanged();
     scanVideos();
     setTimeout(scanVideos, 300);
   });
-  window.addEventListener("spfdone", scanVideos);
-  window.addEventListener("popstate", scanVideos);
-  window.addEventListener("hashchange", scanVideos);
+  window.addEventListener("spfdone", () => {
+    onVideoUrlChanged();
+    scanVideos();
+  });
+  window.addEventListener("popstate", () => {
+    onVideoUrlChanged();
+    scanVideos();
+  });
+  window.addEventListener("hashchange", () => {
+    onVideoUrlChanged();
+    scanVideos();
+  });
+}
+
+// --- Direct Link Click Interception (IDM Style) ---
+const DOWNLOAD_EXTENSIONS = new Set([
+  "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "cab",
+  "exe", "msi", "msix", "appx", "apk", "deb", "rpm", "appimage", "pkg", "run",
+  "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods",
+  "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "3gp",
+  "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus",
+  "torrent", "img", "bin", "rom"
+]);
+
+function getLinkExtension(urlStr) {
+  try {
+    const u = new URL(urlStr, window.location.href);
+    const pathname = u.pathname;
+    const dot = pathname.lastIndexOf(".");
+    if (dot !== -1) {
+      return pathname.substring(dot + 1).toLowerCase().split(/[?#]/)[0];
+    }
+  } catch (_) {
+    const clean = String(urlStr || "").split(/[?#]/)[0];
+    const dot = clean.lastIndexOf(".");
+    if (dot !== -1) {
+      return clean.substring(dot + 1).toLowerCase();
+    }
+  }
+  return "";
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("click", (e) => {
+    if (siteExcluded) return;
+    // Holding Alt key bypasses interception (standard IDM shortcut to force native browser download)
+    if (e.altKey) return;
+
+    const target = e.target;
+    if (!target || typeof target.closest !== "function") return;
+    const link = target.closest("a[href]");
+    if (!link) return;
+
+    const href = link.href;
+    if (!href) return;
+    const isMagnet = href.toLowerCase().startsWith("magnet:");
+    if (!isMagnet && !/^https?:\/\//i.test(href)) return;
+
+    // Never intercept YouTube internal links (e.g. /watch?v=...)
+    if (isYouTubeHost() && (href.includes("/watch?") || href.includes("/shorts/"))) return;
+
+    const hasDownloadAttr = link.hasAttribute("download");
+    const ext = getLinkExtension(href);
+    const isDownloadable = isMagnet || (ext && DOWNLOAD_EXTENSIONS.has(ext)) || hasDownloadAttr;
+
+    if (isDownloadable) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const suggestedName = link.getAttribute("download") || href.split("/").pop()?.split("?")[0] || "download";
+      if (runtime && runtime.runtime && runtime.runtime.sendMessage) {
+        runtime.runtime.sendMessage({
+          action: "downloadLink",
+          url: href,
+          filename: suggestedName,
+          referrer: window.location.href,
+        });
+      }
+    }
+  }, true);
 }
 
 // Export for Node unit testing if applicable

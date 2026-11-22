@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -72,6 +72,9 @@ impl DownloadState {
     pub async fn save_atomic(&mut self) -> Result<()> {
         self.updated_at = Utc::now();
         let state_path = Self::state_file_path(&self.part_path);
+        if let Some(parent) = state_path.parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
         let tmp_path = state_path.with_extension("tmp");
 
         let json_bytes = serde_json::to_vec_pretty(self)

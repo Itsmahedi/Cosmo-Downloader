@@ -47,9 +47,12 @@ When writing or modifying code in this repository, keep in mind:
    - The app uses Windows-specific APIs (`#[cfg(windows)]`, `CREATE_NO_WINDOW`, `std::os::windows::process::CommandExt`, `ShellExecuteExW`, Windows Registry for autostart and native messaging manifests).
    - Be careful not to break Windows-specific features when refactoring.
 
-3. **Native Messaging Protocol Rules:**
+3. **Native Messaging & Extension Protocol Rules:**
    - In `crates/native-host/src/main.rs`, standard output (`stdout`) is strictly reserved for Native Messaging frames (4-byte length prefix + JSON payload).
    - Any logging or debug prints in the host MUST go to `stderr` (e.g. `tracing_subscriber::fmt().with_writer(io::stderr)`). Printing to `stdout` will break browser extension communication.
+   - When spawning detached child processes (`Command::new`) from the native messaging host or bridge server, always redirect `stdin`, `stdout`, and `stderr` to `Stdio::null()` so child processes do not inherit Chrome's native messaging pipe.
+   - Extension download deduplication / debounce must never treat page URLs or referrers as downloaded resource URLs. Debounce must be keyed by `${url}::${quality}` with a short timeout (~1.5s) to allow subsequent downloads from the same page without getting stuck.
+   - Always utilize all available skills and MCP tools at hand during troubleshooting and development.
 
 4. **Local Bridge Port:**
    - The internal HTTP bridge operates on `127.0.0.1:42424`. If modifying this port, it must be changed consistently across `crates/core/src/server.rs` and `crates/native-host/src/main.rs`.

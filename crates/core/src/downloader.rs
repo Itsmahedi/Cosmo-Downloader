@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use futures_util::StreamExt;
@@ -38,6 +38,8 @@ pub struct DownloadOptions {
     pub cookie: Option<String>,
     /// Expected SHA-256 checksum for verification.
     pub expected_sha256: Option<String>,
+    /// Custom headers or extra parameters (e.g. video format selector).
+    pub custom_headers: Option<String>,
     /// Whether to attempt resuming if a partial download exists.
     pub resume: bool,
 }
@@ -53,6 +55,7 @@ impl Default for DownloadOptions {
             referer: None,
             cookie: None,
             expected_sha256: None,
+            custom_headers: None,
             resume: true,
         }
     }
@@ -65,6 +68,7 @@ pub enum DownloadStatus {
     Allocating,
     Downloading,
     Paused,
+    Processing,
     Verifying,
     Completed,
     Failed(String),
@@ -220,6 +224,11 @@ impl Downloader {
         let target_path = self.resolve_target_path(&info)?;
         let part_path = self.resolve_part_path(&target_path);
         let state_path = DownloadState::state_file_path(&part_path);
+
+        // Ensure parent directory exists before creating or saving state files
+        if let Some(parent) = part_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
 
         // Try resuming from existing state if remote metadata still matches
         let mut state = if self.options.resume && state_path.exists() {
@@ -632,7 +641,7 @@ impl Downloader {
                 }
             }
 
-            if last_notify.elapsed() >= Duration::from_millis(100) {
+            if last_notify.elapsed() >= Duration::from_millis(50) {
                 let _ = task.progress_notify.try_send(());
                 last_notify = std::time::Instant::now();
             }
@@ -774,7 +783,7 @@ impl Downloader {
                 last_state_save = std::time::Instant::now();
             }
 
-            if last_notify.elapsed() >= Duration::from_millis(100) {
+            if last_notify.elapsed() >= Duration::from_millis(50) {
                 let speed = tracker.speed_bps();
                 let eta = total_size.and_then(|t| tracker.eta_seconds(t.saturating_sub(downloaded)));
                 let _ = progress_tx.send(DownloadProgress {

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Color32, Margin, Pos2, Rect, Stroke, Vec2};
 use crate::theme::{shapes, ThemeColors};
 use crate::icons;
+use crate::platform;
 use rustget_core::{
     categorize,
     category::Category,
@@ -19,6 +20,8 @@ pub struct AddDialogState<'a> {
     pub remember_category: &'a mut bool,
     pub description: &'a mut String,
     pub file_size: Option<u64>,
+    pub quality: Option<&'a str>,
+    pub formatted_size: Option<&'a str>,
     pub is_probing: bool,
     pub is_reading_info: bool,
     pub info_error: Option<&'a str>,
@@ -225,10 +228,42 @@ pub fn render_add_download_body(
     } else if let Some(ref err) = state.info_error {
         format!("{} · {}", state.category, err)
     } else if rustget_core::youtube::is_streaming_site(state.url) {
-        format!("{} · YouTube", state.category)
+        let size_str = if let Some(fs) = state.formatted_size {
+            Some(fs.to_string())
+        } else if let Some(sz) = state.file_size {
+            Some(SpeedTracker::format_bytes(sz))
+        } else {
+            None
+        };
+        match (state.quality, size_str) {
+            (Some(q), Some(s)) => format!("{} · {} · {}", state.category, q, s),
+            (Some(q), None) => format!("{} · {}", state.category, q),
+            (None, Some(s)) => format!("{} · YouTube · {}", state.category, s),
+            (None, None) => format!("{} · YouTube", state.category),
+        }
+    } else if rustget_core::torrent::is_torrent_url(state.url) {
+        let size_str = if let Some(fs) = state.formatted_size {
+            Some(fs.to_string())
+        } else if let Some(sz) = state.file_size {
+            Some(SpeedTracker::format_bytes(sz))
+        } else {
+            None
+        };
+        match size_str {
+            Some(s) => format!("{} · BitTorrent · {}", state.category, s),
+            None => format!("{} · BitTorrent", state.category),
+        }
     } else if let Ok(parsed) = url::Url::parse(state.url.trim()) {
         let host = parsed.host_str().unwrap_or("link").trim_start_matches("www.");
-        format!("{} · {}", state.category, host)
+        if let Some(fs) = state.formatted_size {
+            format!("{} · {} · {}", state.category, host, fs)
+        } else if let Some(sz) = state.file_size {
+            format!("{} · {} · {}", state.category, host, SpeedTracker::format_bytes(sz))
+        } else if state.is_probing {
+            format!("{} · {} · Checking size...", state.category, host)
+        } else {
+            format!("{} · {}", state.category, host)
+        }
     } else if let Some(sz) = state.file_size {
         format!("{} · {}", state.category, SpeedTracker::format_bytes(sz))
     } else if state.is_probing {
@@ -262,6 +297,7 @@ pub fn render_add_download_body(
             )
             .truncate(),
         );
+
         ui.add(
             egui::Label::new(
                 egui::RichText::new(meta_text)
@@ -336,6 +372,18 @@ pub fn render_add_download_body(
                     egui::ComboBox::from_id_salt("cat_select_clean")
                         .selected_text(display_cat)
                         .width(cat_w)
+                        .icon(|ui, rect, visuals, is_open, _above_or_below| {
+                            let rect = Rect::from_center_size(rect.center(), Vec2::splat(8.0));
+                            let color = visuals.fg_stroke.color;
+                            let stroke = Stroke::new(1.5_f32, color);
+                            let (p1, p2, p3) = if is_open {
+                                (rect.left_bottom(), rect.center_top(), rect.right_bottom())
+                            } else {
+                                (rect.left_top(), rect.center_bottom(), rect.right_top())
+                            };
+                            ui.painter().line_segment([p1, p2], stroke);
+                            ui.painter().line_segment([p2, p3], stroke);
+                        })
                         .show_ui(ui, |ui| {
                             for cat in ["Video", "Music", "Documents", "Compressed", "Programs", "Other"] {
                                 let is_sel = state.category.as_str() == cat || (cat == "Other" && state.category.as_str() == "General");
@@ -440,11 +488,7 @@ pub fn render_add_download_body(
                                 } else {
                                     Category::General.default_dir()
                                 };
-                                if let Some(file_path) = rfd::FileDialog::new()
-                                    .set_title("Save As")
-                                    .set_directory(&start_dir)
-                                    .set_file_name(&*state.filename)
-                                    .save_file()
+                                if let Some(file_path) = platform::pick_save_file_dialog("Save As", &start_dir, &*state.filename)
                                 {
                                     if let Some(parent) = file_path.parent() {
                                         *state.save_dir = parent.to_string_lossy().to_string();
