@@ -35,6 +35,7 @@ A fast, reliable multi-segment download manager for **Windows 10 and Windows 11*
 | :--- | :--- |
 | `CosmoDownloader-Setup-v1.2.6.exe` | **Windows Installer (Recommended)** — Installs Cosmo Downloader (`v1.2.6`), desktop/start shortcuts, `yt-dlp` / `ffmpeg`, and registers browser native messaging hosts. Seamlessly upgrades existing installations. |
 | `CosmoDownloader.exe` | Standalone Windows desktop application binary (`v1.2.6`). |
+| `CosmoDownloader-v1.2.6-windows-x64.zip` | Standalone Portable Windows package (`v1.2.6`) containing all executables, helper tools, and browser extensions. |
 | `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.6.zip` | **All-in-One** unified browser extension package for Google Chrome, Microsoft Edge, Brave, and Opera (`v1.2.6`). |
 
 ---
