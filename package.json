@@ -1,6 +1,6 @@
 {
   "name": "cosmo_downloader",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "A blazing-fast, modern download manager for Windows with seamless browser integration.",
   "main": "index.js",
   "directories": {
@@ -18,7 +18,7 @@
   },
   "keywords": [],
   "author": "Mahedi",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/Itsmahedi/Cosmo-Downloader/issues"

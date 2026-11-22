@@ -133,12 +133,6 @@ try {
         Write-Host "  -> Updated $leaf" -ForegroundColor DarkGray
     }
 
-    # Backward compatibility aliases for CLI and legacy calls
-    $legacyCli = Join-Path $targetInstallDir "rustget.exe"
-    $legacyHost = Join-Path $targetInstallDir "rustget-host.exe"
-    Copy-Item -Path $cliExe -Destination $legacyCli -Force
-    Copy-Item -Path $hostExe -Destination $legacyHost -Force
-
     # Copy application icon used by shortcuts
     $iconSrc = Join-Path $RootDir "icon.ico"
     if (Test-Path $iconSrc) {

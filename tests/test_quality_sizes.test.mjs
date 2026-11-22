@@ -294,8 +294,7 @@ test("Test 7: Search the code: none of the old placeholder values remain", () =>
   const extFiles = [
     path.join(extDir, "content.js"),
     path.join(extDir, "background.js"),
-    path.join(extDir, "content.css"),
-    path.join(rootDir, "Cosmo downloader NEWWW.html")
+    path.join(extDir, "content.css")
   ];
 
   const forbidden = ["148 MB", "82 MB", "41 MB", "24 MB", "9 MB"];

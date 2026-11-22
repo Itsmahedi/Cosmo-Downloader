@@ -61,8 +61,6 @@ Name: "registerbrowsers"; Description: "Register browser extension bridge (Chrom
 Source: "{#BinDir}\CosmoDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\cosmodownloader-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\cosmodownloader-host.exe"; DestDir: "{app}"; DestName: "cosmodownloader-host.tmp"; Flags: ignoreversion
-Source: "{#BinDir}\rustget.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BinDir}\rustget-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion

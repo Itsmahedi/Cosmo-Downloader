@@ -36,7 +36,7 @@
       "48": "icons/icon-48.png",
       "128": "icons/icon-128.png"
     },
-    "default_title": "Cosmo Downloader v1.2",
+    "default_title": "Cosmo Downloader v1.2.7",
     "default_popup": "popup.html"
   },
   "content_scripts": [

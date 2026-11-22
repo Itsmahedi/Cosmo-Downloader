@@ -38,16 +38,7 @@ if ($llvmPkg) {
     $env:PATH = "$cargoBin;$env:PATH"
 }
 
-# 2. Generate Icons if needed
-$iconPath = Join-Path $ScriptDir "icon.ico"
-$extIconPath = Join-Path $RootDir "extension\icons\icon128.png"
-if ((-not (Test-Path $iconPath)) -or (-not (Test-Path $extIconPath))) {
-    Write-Host "[*] Generating application and extension icons..." -ForegroundColor Yellow
-    $genScript = Join-Path $RootDir "scripts\generate_icons.ps1"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $genScript
-}
-
-# 3. Cargo Release Build
+# 2. Cargo Release Build
 if (-not $SkipBuild) {
     Write-Host "[*] Compiling Cosmo Downloader workspace in release mode..." -ForegroundColor Yellow
     Push-Location $RootDir
@@ -74,11 +65,8 @@ if (-not (Test-Path (Join-Path $TargetReleaseDir "CosmoDownloader.exe"))) {
 $cosmoGui  = Join-Path $TargetReleaseDir "CosmoDownloader.exe"
 $cosmoCli  = Join-Path $TargetReleaseDir "cosmodownloader-cli.exe"
 $cosmoHost = Join-Path $TargetReleaseDir "cosmodownloader-host.exe"
-$legacyGui  = Join-Path $TargetReleaseDir "rustget-gui.exe"
-$legacyCli  = Join-Path $TargetReleaseDir "rustget.exe"
-$legacyHost = Join-Path $TargetReleaseDir "rustget-host.exe"
 
-$sourceBinaries = @($cosmoGui, $cosmoCli, $cosmoHost, $legacyGui, $legacyCli, $legacyHost) | Where-Object { Test-Path $_ }
+$sourceBinaries = @($cosmoGui, $cosmoCli, $cosmoHost) | Where-Object { Test-Path $_ }
 if ($sourceBinaries.Count -eq 0) {
     throw "No compiled binaries found in $TargetReleaseDir"
 }
