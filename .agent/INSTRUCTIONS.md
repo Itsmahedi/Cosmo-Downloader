@@ -83,3 +83,7 @@ Include release notes and the version number in each release.
 Release Targets
 Windows: .exe
 Browser: updated extension (with no mention of Linux anywhere in its text)
+
+7. Always create a new Firefox extension ZIP after every code update and save it in C:\Users\steam\OneDrive\Documents\cosmo_downloader\browser-extensions.
+Automatically update the version (current: 1.10.1), verify the new ZIP, then delete old ZIP files. Keep only the latest verified ZIP. Never delete source files.
+

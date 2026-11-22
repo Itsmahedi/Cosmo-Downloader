@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Cosmo Downloader",
-  "version": "1.10.1",
-  "version_name": "v1.10.1",
+  "version": "1.10.2",
+  "version_name": "v1.10.2",
   "description": "High-speed multi-threaded download manager with cosmic acceleration engine. Created by Mahedi.",
   "author": "Mahedi",
   "browser_specific_settings": {
