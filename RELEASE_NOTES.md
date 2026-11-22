@@ -14,6 +14,7 @@ A fast, reliable multi-segment download manager for **Windows 10 and Windows 11*
 - **Facebook & Social Media Video Support**: Added dedicated support for Facebook Reels and videos, Instagram, Twitter/X, TikTok, and local streaming websites. Real browser session cookies, referrers, and user agents are forwarded to the download engine to bypass private or authenticated access restrictions.
 - **Universal Floating Download Button**: Displays the sleek Cosmo Download Pill directly on qualified video players across any website when playback starts.
 - **Quality & Format Picker with Adaptive Fallback**: Real-time display of available stream qualities, resolutions, or direct video streams with exact or estimated file sizes.
+- **YouTube Manifest & Fallback Hardening**: Prevents `.webmanifest` or `/manifest` URLs from hijacking YouTube video downloads and resolves manifest fallbacks cleanly via `yt-dlp`.
 - **HLS/DASH Stream Muxing**: Direct integration with bundled `yt-dlp` and `ffmpeg` engines to download all segments in parallel and stitch them seamlessly into standard `.mp4` format.
 
 ---

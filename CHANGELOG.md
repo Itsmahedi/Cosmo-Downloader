@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Adaptive Stream Quality Options:** Populates floating download menu with detected HLS/DASH resolutions and provides instant fallback stream options when metadata probing is in-flight.
 - **Dynamic Playback Hooks:** Automatically displays the download pill whenever video playback starts on any web domain.
 
+### Fixed
+- **YouTube Webmanifest Fallback:** Prevented `.webmanifest`, `manifest.json`, and `/manifest` requests from hijacking YouTube stream sniffing and added referer fallback handling in `crates/core/src/youtube.rs`.
+
+### Changed
+- **Repository Cleanup & License Alignment:** Added root MIT `LICENSE`, removed unused UI component stubs, legacy `rustget` binary shims/scripts, and outdated build outputs, and synchronized `v1.2.7` documentation, manifests, and Windows resource metadata across the workspace.
+
 ## [1.2.6] - 2026-11-22
 
 ### Added
