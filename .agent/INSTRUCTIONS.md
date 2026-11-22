@@ -37,10 +37,10 @@ Never scan, search, or read the following paths:
 When writing or modifying code in this repository, keep in mind:
 
 1. **Rust Workspace (`2021` Edition):**
-   - `rustget_core` (`crates/core`): Pure download engine, SQLite persistence, rate limiting, and HTTP bridge server.
-   - `cosmodownloader-app` (`crates/app`): Desktop GUI using `egui` and `eframe` (v0.29), tray icon, autostart via Windows Registry, and topmost popup dialog.
-   - `cosmodownloader-host` (`crates/native-host`): Native messaging bridge for Chrome and Firefox extensions.
-   - `cosmodownloader-cli` (`crates/cli`): Command line utility using `clap`.
+   - `rustget-core` (`crates/core`): Pure download engine, SQLite persistence, rate limiting, and HTTP bridge server.
+   - `rustget-app` (`crates/app`, binary `CosmoDownloader.exe`): Desktop GUI using `egui` and `eframe` (v0.29), tray icon, autostart via Windows Registry, and topmost popup dialog.
+   - `cosmodownloader-native-host` (`crates/native-host`, binary `cosmodownloader-host.exe`): Native messaging bridge for Chrome and Firefox extensions.
+   - `cosmodownloader-cli` (`crates/cli`, binary `cosmodownloader-cli.exe`): Command line utility using `clap`.
 
 2. **Windows Platform Considerations:**
    - The primary deployment target is Windows 10 / 11.
@@ -62,6 +62,7 @@ The sole official repository for Cosmo Downloader is Itsmahedi/Cosmo-Downloader.
 All source code, commits, releases, and distribution assets belong exclusively to Itsmahedi/Cosmo-Downloader.
 Always pass --repo Itsmahedi/Cosmo-Downloader explicitly to every gh command.
 Release notes should be comprehensive, clean, and professional.
+Follow [`.agent/skills/repo-sync-and-release/SKILL.md`](skills/repo-sync-and-release/SKILL.md) to always keep the repository up to date (code, docs, license, versions), commit in logical chunks and push to `origin/main`, and upload only the latest verified release files to `Itsmahedi/Cosmo-Downloader`.
 
 ### 🛑 CRITICAL RELEASE ASSET RULES:
 - **ALL-IN-ONE CHROMIUM EXTENSION ONLY**: Upload a single, unified extension package covering all Chromium browsers named `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-vX.Y.Z.zip`. Do NOT create separate one-by-one folders or separate zip files for each browser — package all four into this one single file.
