@@ -28,7 +28,7 @@ pub use segment::{calculate_segments, Segment};
 pub use server::{BridgeServer, ExtensionDownloadRequest, spawn_on_demand_popup, get_or_create_bridge_token};
 pub use speed::SpeedTracker;
 pub use state::DownloadState;
-pub use youtube::{CompactVideoFormats, VideoQualityOption, query_video_formats, get_cached_video_formats, format_quality_size};
+pub use youtube::{CompactVideoFormats, VideoQualityOption, query_video_formats, query_video_formats_with_headers, is_youtube_url, get_cached_video_formats, format_quality_size};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

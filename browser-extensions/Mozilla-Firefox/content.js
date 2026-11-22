@@ -42,6 +42,58 @@ let formatsError = false;
 let formatsRequestId = 0;
 let formatFetchTimeout = null;
 
+let detectedMediaStreams = [];
+
+function isKnownStreamingSite(urlStr = (typeof window !== "undefined" ? window.location.href : "")) {
+  try {
+    const u = new URL(urlStr);
+    const host = u.hostname.toLowerCase();
+    return host.includes("youtube.com") || host.includes("youtu.be") ||
+           host.includes("facebook.com") || host.includes("fb.watch") ||
+           host.includes("fb.com") || host.includes("instagram.com") ||
+           host.includes("tiktok.com") || host.includes("twitter.com") ||
+           host.includes("x.com") || host.includes("vimeo.com") ||
+           host.includes("dailymotion.com") || host.includes("reddit.com") ||
+           host.includes("twitch.tv") || host.includes("bilibili.com");
+  } catch (_) {
+    return false;
+  }
+}
+
+function onMediaStreamDetected(stream) {
+  if (!stream || !stream.url) return;
+  if (!detectedMediaStreams.some((s) => s.url === stream.url)) {
+    detectedMediaStreams.unshift(stream);
+    if (detectedMediaStreams.length > 10) detectedMediaStreams.pop();
+  }
+  debouncedScanVideos();
+  updateAllOpenMenus();
+}
+
+if (runtime && runtime.runtime && runtime.runtime.sendMessage) {
+  try {
+    runtime.runtime.sendMessage({ action: "getTabMediaStreams" }, (res) => {
+      if (res && res.success && Array.isArray(res.streams) && res.streams.length > 0) {
+        res.streams.forEach((s) => {
+          if (!detectedMediaStreams.some((d) => d.url === s.url)) {
+            detectedMediaStreams.push(s);
+          }
+        });
+        debouncedScanVideos();
+        updateAllOpenMenus();
+      }
+    });
+  } catch (_) {}
+
+  try {
+    runtime.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.action === "mediaStreamDetected" && msg.stream) {
+        onMediaStreamDetected(msg.stream);
+      }
+    });
+  } catch (_) {}
+}
+
 function getYouTubeVideoId(urlStr = (typeof window !== "undefined" ? window.location.href : "")) {
   try {
     const u = new URL(urlStr);
@@ -70,7 +122,7 @@ function getCurrentStreamingUrl() {
 
 function fetchFormatsForVideo(url) {
   if (!url) return;
-  const isVideoPage = isYouTubeHost() || url.includes("youtube.com") || url.includes("youtu.be") || url.includes("/watch") || url.includes("/shorts/");
+  const isVideoPage = isKnownStreamingSite(url) || url.includes(".m3u8") || url.includes(".mpd") || document.querySelector("video") !== null;
   if (!isVideoPage) {
     return;
   }
@@ -89,7 +141,12 @@ function fetchFormatsForVideo(url) {
 
   if (runtime && runtime.runtime && runtime.runtime.sendMessage) {
     try {
-      runtime.runtime.sendMessage({ action: "getVideoFormats", url }, (res) => {
+      runtime.runtime.sendMessage({
+        action: "getVideoFormats",
+        url,
+        pageUrl: window.location.href,
+        cookies: document.cookie || ""
+      }, (res) => {
         if (formatsRequestId !== reqId) return; // stale/superseded request
         if (formatFetchTimeout) clearTimeout(formatFetchTimeout);
         formatsLoading = false;
@@ -260,6 +317,62 @@ function renderMenuRows(menu, videoEl) {
       attachItemClickHandler(item, videoEl, menu);
       itemsContainer.appendChild(item);
     }
+  } else if (detectedMediaStreams.length > 0) {
+    // 2. Media streams captured by network sniffer (.m3u8, .mpd, or direct .mp4)
+    detectedMediaStreams.slice(0, 4).forEach((stream) => {
+      const item = document.createElement("button");
+      item.className = "cosmo-quality-item";
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("data-format", "stream");
+
+      const label = stream.type === "hls" ? "HLS Stream (.m3u8)" : (stream.type === "dash" ? "DASH Stream (.mpd)" : "Video Stream (.mp4)");
+      const szFmt = stream.size > 0 ? (Math.round(stream.size / (1024 * 1024) * 10) / 10 + " MB") : (stream.type === "hls" ? "Adaptive" : "Auto");
+
+      item._qualityOption = {
+        label,
+        format: "best",
+        _streamUrl: stream.url,
+        size_formatted: szFmt,
+      };
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "quality-name";
+      titleSpan.textContent = label;
+
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "meta";
+      metaSpan.textContent = szFmt;
+
+      item.appendChild(titleSpan);
+      item.appendChild(metaSpan);
+      attachItemClickHandler(item, videoEl, menu);
+      itemsContainer.appendChild(item);
+    });
+
+    const hr = document.createElement("hr");
+    itemsContainer.appendChild(hr);
+
+    const bestItem = document.createElement("button");
+    bestItem.className = "cosmo-quality-item";
+    bestItem.type = "button";
+    bestItem.setAttribute("role", "option");
+    bestItem.setAttribute("data-format", "best");
+    bestItem._qualityOption = {
+      label: "Best available",
+      format: "best",
+      _streamUrl: detectedMediaStreams[0].url,
+    };
+    const bTitle = document.createElement("span");
+    bTitle.className = "quality-name";
+    bTitle.textContent = "Best available";
+    const bMeta = document.createElement("span");
+    bMeta.className = "meta";
+    bMeta.textContent = "Auto";
+    bestItem.appendChild(bTitle);
+    bestItem.appendChild(bMeta);
+    attachItemClickHandler(bestItem, videoEl, menu);
+    itemsContainer.appendChild(bestItem);
   } else {
     // Formats not yet loaded or error: show default rows
     DEFAULT_QUALITIES.forEach((q) => {
@@ -280,26 +393,14 @@ function renderMenuRows(menu, videoEl) {
       titleSpan.textContent = q.label;
 
       const metaSpan = document.createElement("span");
-      if (formatsError) {
-        metaSpan.className = "meta";
-        metaSpan.textContent = "";
-      } else {
-        metaSpan.className = "meta loading-placeholder";
-        metaSpan.textContent = "";
-      }
+      metaSpan.className = "meta";
+      metaSpan.textContent = q.audioOnly ? "MP3" : "Auto";
 
       item.appendChild(titleSpan);
       item.appendChild(metaSpan);
       attachItemClickHandler(item, videoEl, menu);
       itemsContainer.appendChild(item);
     });
-
-    if (formatsError) {
-      const errLine = document.createElement("div");
-      errLine.className = "cosmo-sizes-unavailable";
-      errLine.textContent = "Sizes unavailable";
-      itemsContainer.appendChild(errLine);
-    }
   }
 }
 
@@ -394,18 +495,23 @@ function isMiniPreview(videoEl, win = window) {
     return true;
   }
 
-  // Non-YouTube hosts:
-  // Lenient fallback size check: ignore if strictly less than 320x180
+  // Non-YouTube hosts (Facebook, Vimeo, TikTok, local streaming sites, HTML5 video):
+  // 1. If actively playing or has played: NEVER a preview!
+  if (!videoEl.paused || videoEl.currentTime > 0) {
+    return false;
+  }
+
+  // 2. Lenient fallback size check: ignore if strictly less than 160x90
   try {
     if (typeof videoEl.getBoundingClientRect === "function") {
       const rect = videoEl.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0 && (rect.width < 320 || rect.height < 180)) {
+      if (rect.width > 0 && rect.height > 0 && (rect.width < 160 || rect.height < 90)) {
         return true;
       }
     }
   } catch (_) {}
 
-  if (videoEl.clientWidth > 0 && videoEl.clientHeight > 0 && (videoEl.clientWidth < 320 || videoEl.clientHeight < 180)) {
+  if (videoEl.clientWidth > 0 && videoEl.clientHeight > 0 && (videoEl.clientWidth < 160 || videoEl.clientHeight < 90)) {
     return true;
   }
 
@@ -437,6 +543,14 @@ function getHostContainer(videoEl, win = window) {
     }
 
     return videoEl.parentElement;
+  }
+
+  // Non-YouTube hosts: look for custom player containers, or parent element
+  if (typeof videoEl.closest === "function") {
+    const customPlayer = videoEl.closest("[data-video-id], .video-player, .player-container, [role='region'], div[data-sigil='inlineVideo']");
+    if (customPlayer) {
+      return customPlayer;
+    }
   }
 
   return videoEl.parentElement || videoEl;
@@ -788,8 +902,18 @@ function triggerDownload(videoEl, format, qualityOption = null) {
 
   const rawPageUrl = window.location.href;
   const pageUrl = normalizeStreamingUrl(rawPageUrl);
-  const isStreaming = pageUrl.includes("youtube.com") || pageUrl.includes("youtu.be") || pageUrl.includes("vimeo.com");
-  const urlToSend = (isStreaming || !videoUrl || videoUrl.startsWith("blob:")) ? pageUrl : videoUrl;
+  const isStreaming = isKnownStreamingSite(pageUrl);
+
+  let urlToSend = "";
+  if (qualityOption?._streamUrl) {
+    urlToSend = qualityOption._streamUrl;
+  } else if (detectedMediaStreams.length > 0 && (!videoUrl || videoUrl.startsWith("blob:"))) {
+    urlToSend = detectedMediaStreams[0].url;
+  } else if (isStreaming || !videoUrl || videoUrl.startsWith("blob:")) {
+    urlToSend = pageUrl;
+  } else {
+    urlToSend = videoUrl;
+  }
 
   const now = Date.now();
   if (lastDownloadTriggered.url === urlToSend && lastDownloadTriggered.format === format && (now - lastDownloadTriggered.timestamp) < 400) {
@@ -814,6 +938,7 @@ function triggerDownload(videoEl, format, qualityOption = null) {
       sizeFormatted: qualityOption?.size_formatted || null,
       isApprox: qualityOption?.is_approx ?? null,
       formatId: qualityOption?.format_id || null,
+      cookies: document.cookie || "",
     });
   } catch (err) {
     console.warn("[CosmoDownloader] Send message failed:", err);
@@ -842,6 +967,20 @@ function scanVideos() {
   // 2. Scan all current video elements
   const videos = document.querySelectorAll("video");
   videos.forEach((videoEl) => {
+    if (!videoEl.__cosmoListenerAdded) {
+      videoEl.__cosmoListenerAdded = true;
+      videoEl.addEventListener("play", () => {
+        if (!activeAttachedButtons.has(videoEl)) {
+          attachCosmoDownloadButton(videoEl);
+        }
+      });
+      videoEl.addEventListener("playing", () => {
+        if (!activeAttachedButtons.has(videoEl)) {
+          attachCosmoDownloadButton(videoEl);
+        }
+      });
+    }
+
     if (isMiniPreview(videoEl)) {
       if (activeAttachedButtons.has(videoEl)) {
         activeAttachedButtons.get(videoEl).cleanup();
@@ -874,7 +1013,7 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
   checkSiteExclusion();
   currentVideoUrl = getCurrentStreamingUrl();
   currentVideoId = getYouTubeVideoId(currentVideoUrl);
-  if (currentVideoId || currentVideoUrl.includes("/watch") || currentVideoUrl.includes("/shorts/")) {
+  if (currentVideoId || isKnownStreamingSite(currentVideoUrl) || currentVideoUrl.includes("/watch") || currentVideoUrl.includes("/shorts/")) {
     fetchFormatsForVideo(currentVideoUrl);
   }
   scanVideos();

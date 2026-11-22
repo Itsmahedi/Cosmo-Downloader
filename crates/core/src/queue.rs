@@ -412,7 +412,12 @@ impl QueueManager {
         });
 
         let is_torrent = crate::torrent::is_torrent_url(&record.url);
-        let is_stream = !is_torrent && crate::youtube::is_streaming_site(&record.url);
+        let is_stream = !is_torrent && (
+            crate::youtube::is_streaming_site(&record.url)
+            || record.custom_headers.as_deref() == Some("best")
+            || record.custom_headers.as_deref() == Some("audio")
+            || record.custom_headers.as_ref().map(|s| s.ends_with('p')).unwrap_or(false)
+        );
         let ytdlp_bin = if is_stream { crate::youtube::find_ytdlp_binary() } else { None };
 
         let result = if is_torrent {
@@ -433,6 +438,9 @@ impl QueueManager {
                 cancel_token.clone(),
                 prog_tx,
                 format_selector,
+                record.cookie.as_deref(),
+                record.referer.as_deref(),
+                record.user_agent.as_deref(),
             ).await
         } else {
             let mut downloader = Downloader::new(options, cancel_token.clone())

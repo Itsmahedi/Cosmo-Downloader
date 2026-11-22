@@ -1,31 +1,20 @@
-# Cosmo Downloader v1.2.6
+# Cosmo Downloader v1.2.7
 
 A fast, reliable multi-segment download manager for **Windows 10 and Windows 11**, paired with redesigned browser extensions for Google Chrome, Microsoft Edge, Brave, Opera, and Mozilla Firefox.
 
 ---
 
-## What's New in v1.2.6
+## What's New in v1.2.7
 
-### 🎬 Video Player & Mini-Preview Fixes
-- **Strict Video Targeting**: Fixed download button injection on YouTube and streaming sites so it appears strictly on active main players (`#movie_player` and active Shorts). Buttons are completely prevented from showing on video thumbnails, mini players, or recommendation feeds.
-- **Subsequent Downloads Debounce**: Solved rapid consecutive download race conditions, allowing instant subsequent downloads without getting blocked.
-- **Lenient Size Fallback**: Improved format parsing and size resolution for streaming videos.
-
-### 🔌 Real-Time Extension Probing & 1-Click Launch
-- **App Lifecycle Health Probing**: Extension dynamically polls internal loopback `/health` to immediately detect when Cosmo Downloader starts or stops.
-- **3-State Connection Status**: Extension popup clearly displays whether Cosmo Downloader is Connected (green), Closed (orange), or Host Missing (red).
-- **1-Click Launch**: If the application is closed, clicking the status banner instantly launches Cosmo Downloader via the native messaging host.
-
-### 🎨 Modernized Desktop GUI & Category HUD
-- **Interactive Category Filter Pills**: Instant filtering by file type (All, Video, Audio, Documents, Compressed, Programs, Others) with live item count badges.
-- **Direct File & Folder Actions**: One-click "Open File" and "Open Folder" action buttons on completed downloads.
-- **Segmented Visual Progress Bars**: Real-time multi-threaded segment progress visualization.
-- **Live Speed HUD**: Aggregate download speed indicator in toolbar and tray.
-- **Vector Icons**: Replaced raster assets with sharp, scalable vector icons rendered directly with `egui::Painter`.
-
-### 🪟 Foreground Activation & Windows Platform Fixes
-- **Reliable Topmost Raising**: Ensured the download info dialog raises reliably above browsers (`BringWindowToTop`, `SetForegroundWindow`, `AttachThreadInput`).
-- **Unicode Sanitization**: Enhanced disk path resolution and sanitization for Unicode filenames.
+### 🎥 Universal IDM-Style Video Sniffer & Download Engine
+- **Network Stream Sniffing**: The browser extensions now actively monitor network media streams via `webRequest` without blocking or slowing page loads. Automatically intercepts and extracts:
+  - **HLS (.m3u8)** adaptive video playlists and manifests
+  - **DASH (.mpd)** XML dynamic adaptive streams
+  - **Direct video streams** (`.mp4`, `.webm`, `.m4v`, `.flv`, `.mov`, and `video/*` media types)
+- **Facebook & Social Media Video Support**: Added dedicated support for Facebook Reels and videos, Instagram, Twitter/X, TikTok, and local streaming websites. Real browser session cookies, referrers, and user agents are forwarded to the download engine to bypass private or authenticated access restrictions.
+- **Universal Floating Download Button**: Displays the sleek Cosmo Download Pill directly on qualified video players across any website when playback starts.
+- **Quality & Format Picker with Adaptive Fallback**: Real-time display of available stream qualities, resolutions, or direct video streams with exact or estimated file sizes.
+- **HLS/DASH Stream Muxing**: Direct integration with bundled `yt-dlp` and `ffmpeg` engines to download all segments in parallel and stitch them seamlessly into standard `.mp4` format.
 
 ---
 
@@ -33,19 +22,19 @@ A fast, reliable multi-segment download manager for **Windows 10 and Windows 11*
 
 | File | Description |
 | :--- | :--- |
-| `CosmoDownloader-Setup-v1.2.6.exe` | **Windows Installer (Recommended)** — Installs Cosmo Downloader (`v1.2.6`), desktop/start shortcuts, `yt-dlp` / `ffmpeg`, and registers browser native messaging hosts. Seamlessly upgrades existing installations. |
-| `CosmoDownloader.exe` | Standalone Windows desktop application binary (`v1.2.6`). |
-| `CosmoDownloader-v1.2.6-windows-x64.zip` | Standalone Portable Windows package (`v1.2.6`) containing all executables, helper tools, and browser extensions. |
-| `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.6.zip` | **All-in-One** unified browser extension package for Google Chrome, Microsoft Edge, Brave, and Opera (`v1.2.6`). |
+| `CosmoDownloader-Setup-v1.2.7.exe` | **Windows Installer (Recommended)** — Installs Cosmo Downloader (`v1.2.7`), desktop/start shortcuts, `yt-dlp` / `ffmpeg`, and registers browser native messaging hosts. Seamlessly upgrades existing installations. |
+| `CosmoDownloader.exe` | Standalone Windows desktop application binary (`v1.2.7`). |
+| `CosmoDownloader-v1.2.7-windows-x64.zip` | Standalone Portable Windows package (`v1.2.7`) containing all executables, helper tools, and browser extensions. |
+| `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.7.zip` | **All-in-One** unified browser extension package for Google Chrome, Microsoft Edge, Brave, and Opera (`v1.2.7`). |
 
 ---
 
 ## Quick Install (Windows)
 
-1. Download and run **`CosmoDownloader-Setup-v1.2.6.exe`**.
+1. Download and run **`CosmoDownloader-Setup-v1.2.7.exe`** (or use the standalone `CosmoDownloader.exe`).
 2. **Chrome / Microsoft Edge / Brave / Opera:**
-   - Extract **`CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.6.zip`**.
+   - Extract **`CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.7.zip`**.
    - Open your browser's extensions management page (`chrome://extensions`, `edge://extensions`, `brave://extensions`, `opera://extensions`).
    - Enable **Developer mode** (top-right toggle).
    - Click **Load unpacked** and select the extracted extension folder.
-3. Downloads clicked inside your browser or from video players will automatically open the redesigned Cosmo Downloader popup dialog.
+3. Videos played on YouTube, Facebook, or any streaming website will now show the Cosmo download button and download smoothly with full multi-segment acceleration.

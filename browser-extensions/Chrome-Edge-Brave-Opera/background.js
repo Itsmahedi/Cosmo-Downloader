@@ -297,6 +297,9 @@ async function deliverToCosmo(data) {
   markUrlSent(url);
 
   let cookieHeader = data.cookies || "";
+  if (!cookieHeader && data.referrer) {
+    cookieHeader = await getCookiesForUrl(data.referrer);
+  }
   if (!cookieHeader) {
     cookieHeader = await getCookiesForUrl(url);
   }
@@ -596,14 +599,125 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-async function fetchVideoFormats(url) {
+// --- Universal Media Stream Sniffer (IDM-style video stream detection) ---
+const tabMediaStreams = new Map(); // tabId -> Array<{ url, type, mime, size, timestamp }>
+
+if (chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    tabMediaStreams.delete(tabId);
+  });
+}
+
+function isMediaStreamRequest(url, headers) {
+  if (!url || typeof url !== "string") return null;
+  const lowerUrl = url.toLowerCase();
+
+  // Exclude internal / bridge / telemetry / ad URLs
+  if (lowerUrl.includes("127.0.0.1:42424") || lowerUrl.includes("localhost:42424")) return null;
+  if (lowerUrl.includes("google-analytics.com") || lowerUrl.includes("doubleclick.net")) return null;
+
+  let contentType = "";
+  let contentLength = 0;
+  if (Array.isArray(headers)) {
+    for (const h of headers) {
+      const name = (h.name || "").toLowerCase();
+      if (name === "content-type") {
+        contentType = (h.value || "").toLowerCase();
+      } else if (name === "content-length") {
+        contentLength = parseInt(h.value || "0", 10) || 0;
+      }
+    }
+  }
+
+  // 1. HLS playlist / manifest (.m3u8)
+  if (lowerUrl.includes(".m3u8") || contentType.includes("application/vnd.apple.mpegurl") || contentType.includes("application/x-mpegurl") || contentType.includes("audio/mpegurl")) {
+    return { type: "hls", mime: contentType || "application/vnd.apple.mpegurl", size: contentLength };
+  }
+
+  // 2. DASH manifest (.mpd)
+  if (lowerUrl.includes(".mpd") || contentType.includes("application/dash+xml")) {
+    return { type: "dash", mime: contentType || "application/dash+xml", size: contentLength };
+  }
+
+  // 3. Direct video streams (.mp4, .webm, .m4v, .flv, .mov, or video/* mime)
+  const isVideoExt = lowerUrl.includes(".mp4") || lowerUrl.includes(".webm") || lowerUrl.includes(".m4v") || lowerUrl.includes(".flv") || lowerUrl.includes(".mov");
+  const isVideoMime = contentType.startsWith("video/") && !contentType.includes("mp2t");
+
+  if (isVideoExt || isVideoMime) {
+    if (contentLength > 0 && contentLength < 120000) {
+      return null; // Ignore tiny tracking video icons
+    }
+    // Filter out YouTube internal chunk requests (YouTube is handled natively by yt-dlp)
+    if (lowerUrl.includes("googlevideo.com/videoplayback")) {
+      return null;
+    }
+    return { type: "video", mime: contentType || "video/mp4", size: contentLength };
+  }
+
+  return null;
+}
+
+if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
+  try {
+    chrome.webRequest.onHeadersReceived.addListener(
+      (details) => {
+        if (!details || details.tabId <= 0) return;
+        const media = isMediaStreamRequest(details.url, details.responseHeaders);
+        if (!media) return;
+
+        let streams = tabMediaStreams.get(details.tabId);
+        if (!streams) {
+          streams = [];
+          tabMediaStreams.set(details.tabId, streams);
+        }
+
+        if (streams.some((s) => s.url === details.url)) {
+          return;
+        }
+
+        const streamRecord = {
+          url: details.url,
+          type: media.type,
+          mime: media.mime,
+          size: media.size,
+          timestamp: Date.now(),
+        };
+
+        streams.unshift(streamRecord);
+        if (streams.length > 10) streams.pop();
+
+        try {
+          chrome.tabs.sendMessage(details.tabId, {
+            action: "mediaStreamDetected",
+            stream: streamRecord,
+          }).catch(() => {});
+        } catch (_) {}
+      },
+      { urls: ["<all_urls>"] },
+      ["responseHeaders"]
+    );
+  } catch (err) {
+    console.warn("[CosmoDownloader] webRequest.onHeadersReceived listener registration:", err);
+  }
+}
+
+async function fetchVideoFormats(url, cookies = "", referer = "") {
+  if (!cookies && referer) {
+    cookies = await getCookiesForUrl(referer);
+  }
+  if (!cookies && url) {
+    cookies = await getCookiesForUrl(url);
+  }
+
   const ports = [activeBridgePort, ...CANDIDATE_PORTS.filter((p) => p !== activeBridgePort)];
   for (const port of ports) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
-      const resp = await fetch(`http://127.0.0.1:${port}/formats?url=${encodeURIComponent(url)}`, {
-        method: "GET",
+      const resp = await fetch(`http://127.0.0.1:${port}/formats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, cookies, referer }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -619,7 +733,7 @@ async function fetchVideoFormats(url) {
 
   // Fallback: Native Messaging Host
   try {
-    const hostRes = await sendViaNativeHost({ action: "formats", url }, 8000);
+    const hostRes = await sendViaNativeHost({ action: "formats", url, cookies, referer }, 8000);
     if (hostRes && hostRes.success && hostRes.formats) {
       return { success: true, formats: hostRes.formats };
     }
@@ -771,10 +885,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: false, error: "Empty URL" });
       break;
 
+    case "getTabMediaStreams": {
+      const tabId = _sender.tab?.id;
+      const streams = tabId ? (tabMediaStreams.get(tabId) || []) : [];
+      sendResponse({ success: true, streams });
+      break;
+    }
+
     case "getVideoFormats":
     case "getFormats":
       if (message.url) {
-        fetchVideoFormats(message.url)
+        fetchVideoFormats(message.url, message.cookies || "", message.referer || message.pageUrl || "")
           .then((res) => sendResponse(res))
           .catch((err) => sendResponse({ success: false, error: String(err) }));
         return true;

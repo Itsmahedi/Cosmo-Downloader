@@ -304,7 +304,7 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
 
             let (running, port) = check_bridge_health().await;
             if running {
-                if let Ok(formats) = forward_formats_to_bridge_server(port, &url).await {
+                if let Ok(formats) = forward_formats_to_bridge_server(port, &url, msg.cookies.as_deref(), msg.referer.as_deref()).await {
                     return HostResponse {
                         success: true,
                         app_running: Some(true),
@@ -315,7 +315,12 @@ async fn handle_message(msg: ExtensionMessage) -> HostResponse {
                 }
             }
 
-            match rustget_core::youtube::query_video_formats(&url).await {
+            match rustget_core::youtube::query_video_formats_with_headers(
+                &url,
+                msg.cookies.as_deref(),
+                msg.referer.as_deref(),
+                msg.user_agent.as_deref(),
+            ).await {
                 Ok(formats) => HostResponse {
                     success: true,
                     app_running: Some(running),
@@ -592,13 +597,19 @@ async fn forward_to_bridge_server(
 async fn forward_formats_to_bridge_server(
     port: u16,
     url: &str,
+    cookies: Option<&str>,
+    referer: Option<&str>,
 ) -> anyhow::Result<rustget_core::youtube::CompactVideoFormats> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
 
     let bridge_url = format!("http://127.0.0.1:{}/formats", port);
-    let payload = serde_json::json!({ "url": url });
+    let payload = serde_json::json!({
+        "url": url,
+        "cookies": cookies,
+        "referer": referer,
+    });
     let resp = client.post(&bridge_url)
         .header("Content-Type", "application/json")
         .body(payload.to_string())

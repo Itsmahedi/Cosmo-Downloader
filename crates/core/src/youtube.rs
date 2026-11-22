@@ -13,18 +13,35 @@ use crate::downloader::{DownloadProgress, DownloadStatus};
 use crate::error::{DownloadError, Result};
 use crate::probe::redact_url_for_log;
 
-/// Detect whether a URL is from a known video streaming platform (YouTube, Vimeo, TikTok, etc.)
+/// Detect whether a URL is from a known video streaming platform (YouTube, Facebook, Vimeo, TikTok, etc.)
+/// or points to a streaming manifest / segment (.m3u8, .mpd, blob).
 pub fn is_streaming_site(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     lower.contains("youtube.com/")
         || lower.contains("youtu.be/")
-        || lower.contains("vimeo.com/")
+        || lower.contains("facebook.com/")
+        || lower.contains("fb.watch/")
+        || lower.contains("fb.com/")
+        || lower.contains("instagram.com/")
         || lower.contains("tiktok.com/")
         || lower.contains("twitter.com/")
         || lower.contains("x.com/")
-        || lower.contains("facebook.com/")
-        || lower.contains("instagram.com/")
+        || lower.contains("vimeo.com/")
         || lower.contains("reddit.com/")
+        || lower.contains("dailymotion.com/")
+        || lower.contains("twitch.tv/")
+        || lower.contains("bilibili.com/")
+        || lower.contains(".m3u8")
+        || lower.contains(".mpd")
+        || lower.contains("/manifest")
+        || lower.contains("/hls/")
+        || lower.contains("/dash/")
+}
+
+/// Detect whether a URL is specifically a YouTube video.
+pub fn is_youtube_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("youtube.com/") || lower.contains("youtu.be/")
 }
 
 /// Normalizes streaming URLs: if the URL has a "v" query parameter, keeps only the single
@@ -605,6 +622,62 @@ pub fn parse_compact_video_formats(json: &serde_json::Value, fallback_url: &str)
         }
     }
 
+    // If standard resolutions were not matched (e.g. Facebook videos, vertical reels, custom HLS), collect available video formats
+    if qualities.is_empty() && !formats.is_empty() {
+        let mut candidates: Vec<(u32, &serde_json::Value)> = formats
+            .iter()
+            .filter_map(|f| {
+                let h = f.get("height").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(0);
+                let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
+                let ext = f.get("ext").and_then(|v| v.as_str()).unwrap_or("");
+                if (h > 0 || vcodec != "none") && ext != "mhtml" {
+                    Some((h, f))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut seen = std::collections::HashSet::new();
+        for (h, f) in candidates {
+            let label = if h > 0 {
+                format!("{}p", h)
+            } else {
+                f.get("format_note").and_then(|v| v.as_str()).unwrap_or("HD").to_string()
+            };
+            if seen.insert(label.clone()) {
+                let (sz, is_est) = extract_stream_size(f, duration_secs);
+                let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("best").to_string();
+                let sz_fmt = format_quality_size(sz, is_est);
+                qualities.push(VideoQualityOption {
+                    label: label.clone(),
+                    format: label,
+                    height: if h > 0 { Some(h) } else { None },
+                    format_id: fid,
+                    size: sz,
+                    size_formatted: sz_fmt,
+                    is_approx: is_est,
+                });
+                if qualities.len() >= 6 {
+                    break;
+                }
+            }
+        }
+    }
+
+    if qualities.is_empty() {
+        qualities.push(VideoQualityOption {
+            label: "Best Quality".to_string(),
+            format: "best".to_string(),
+            height: None,
+            format_id: "best".to_string(),
+            size: None,
+            size_formatted: "Auto".to_string(),
+            is_approx: false,
+        });
+    }
+
     // 3. Best available / Auto
     let best = qualities.first().map(|top| {
         let meta = if is_live {
@@ -623,6 +696,16 @@ pub fn parse_compact_video_formats(json: &serde_json::Value, fallback_url: &str)
             size_formatted: meta,
             is_approx: top.is_approx,
         }
+    }).or_else(|| {
+        Some(VideoQualityOption {
+            label: "Best available".to_string(),
+            format: "best".to_string(),
+            height: None,
+            format_id: "best".to_string(),
+            size: None,
+            size_formatted: "Auto".to_string(),
+            is_approx: false,
+        })
     });
 
     CompactVideoFormats {
@@ -670,6 +753,16 @@ pub fn get_cached_video_formats(url: &str) -> Option<CompactVideoFormats> {
 
 /// Query compact video formats using yt-dlp, shared with Download File Info dialog and cached for 10 minutes.
 pub async fn query_video_formats(url: &str) -> std::result::Result<CompactVideoFormats, String> {
+    query_video_formats_with_headers(url, None, None, None).await
+}
+
+/// Query compact video formats with optional session cookies, referer, and user-agent.
+pub async fn query_video_formats_with_headers(
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+) -> std::result::Result<CompactVideoFormats, String> {
     let key = normalize_url_key(url);
     if key.is_empty() {
         return Err("Empty URL".to_string());
@@ -700,7 +793,7 @@ pub async fn query_video_formats(url: &str) -> std::result::Result<CompactVideoF
     }
 
     // Leader: execute yt-dlp
-    let result = execute_query_video_formats(url).await;
+    let result = execute_query_video_formats(url, cookie, referer, user_agent).await;
 
     // Save to cache on success
     if let Ok(ref info) = result {
@@ -724,7 +817,12 @@ pub async fn query_video_formats(url: &str) -> std::result::Result<CompactVideoF
     result
 }
 
-async fn execute_query_video_formats(url: &str) -> std::result::Result<CompactVideoFormats, String> {
+async fn execute_query_video_formats(
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+) -> std::result::Result<CompactVideoFormats, String> {
     let ytdlp = find_ytdlp_binary().ok_or_else(|| "yt-dlp binary not found".to_string())?;
 
     let temp_dir = std::env::temp_dir().join(format!(
@@ -750,8 +848,29 @@ async fn execute_query_video_formats(url: &str) -> std::result::Result<CompactVi
         "--dump-single-json",
         "--no-playlist",
         "--no-warnings",
-        url,
     ]);
+
+    if is_youtube_url(url) {
+        cmd.args(["--extractor-args", "youtube:player_client=android,web,default"]);
+    }
+
+    if let Some(c) = cookie {
+        if !c.trim().is_empty() {
+            cmd.args(["--add-header", &format!("Cookie: {}", c.trim())]);
+        }
+    }
+    if let Some(r) = referer {
+        if !r.trim().is_empty() {
+            cmd.args(["--referer", r.trim()]);
+        }
+    }
+    if let Some(ua) = user_agent {
+        if !ua.trim().is_empty() {
+            cmd.args(["--user-agent", ua.trim()]);
+        }
+    }
+
+    cmd.arg(url);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -784,11 +903,98 @@ async fn execute_query_video_formats(url: &str) -> std::result::Result<CompactVi
                 } else {
                     "Failed to extract video info".to_string()
                 };
+
+                // Fallback for media streams or streaming URLs (e.g. HLS, DASH, direct streams)
+                if is_streaming_site(url) || url.contains(".m3u8") || url.contains(".mpd") {
+                    let fallback_title = if is_youtube_url(url) {
+                        "YouTube Video"
+                    } else if url.contains("facebook.com") || url.contains("fb.watch") {
+                        "Facebook Video"
+                    } else {
+                        "Web Video Stream"
+                    };
+                    return Ok(CompactVideoFormats {
+                        video_id: normalize_url_key(url),
+                        title: fallback_title.to_string(),
+                        duration: 0,
+                        is_live: false,
+                        qualities: vec![
+                            VideoQualityOption {
+                                label: "Best Available (Auto)".to_string(),
+                                format: "best".to_string(),
+                                height: None,
+                                format_id: "best".to_string(),
+                                size: None,
+                                size_formatted: "Auto".to_string(),
+                                is_approx: false,
+                            }
+                        ],
+                        audio: Some(VideoQualityOption {
+                            label: "Audio only".to_string(),
+                            format: "audio".to_string(),
+                            height: None,
+                            format_id: "bestaudio".to_string(),
+                            size: None,
+                            size_formatted: "Auto".to_string(),
+                            is_approx: false,
+                        }),
+                        best: Some(VideoQualityOption {
+                            label: "Best Available (MP4)".to_string(),
+                            format: "best".to_string(),
+                            height: None,
+                            format_id: "best".to_string(),
+                            size: None,
+                            size_formatted: "Auto".to_string(),
+                            is_approx: false,
+                        }),
+                    });
+                }
+
                 Err(err_msg)
             }
         }
         Ok(Err(e)) => Err(format!("Process error: {}", e)),
-        Err(_) => Err("Video info lookup timed out after 8s".to_string()),
+        Err(_) => {
+            // If probe timed out but URL is a known streaming / media site, return graceful stream option
+            if is_streaming_site(url) || url.contains(".m3u8") || url.contains(".mpd") {
+                return Ok(CompactVideoFormats {
+                    video_id: normalize_url_key(url),
+                    title: "Web Video Stream".to_string(),
+                    duration: 0,
+                    is_live: false,
+                    qualities: vec![
+                        VideoQualityOption {
+                            label: "Best Available (Auto)".to_string(),
+                            format: "best".to_string(),
+                            height: None,
+                            format_id: "best".to_string(),
+                            size: None,
+                            size_formatted: "Auto".to_string(),
+                            is_approx: false,
+                        }
+                    ],
+                    audio: Some(VideoQualityOption {
+                        label: "Audio only".to_string(),
+                        format: "audio".to_string(),
+                        height: None,
+                        format_id: "bestaudio".to_string(),
+                        size: None,
+                        size_formatted: "Auto".to_string(),
+                        is_approx: false,
+                    }),
+                    best: Some(VideoQualityOption {
+                        label: "Best Available (MP4)".to_string(),
+                        format: "best".to_string(),
+                        height: None,
+                        format_id: "best".to_string(),
+                        size: None,
+                        size_formatted: "Auto".to_string(),
+                        is_approx: false,
+                    }),
+                });
+            }
+            Err("Video info lookup timed out after 8s".to_string())
+        }
     }
 }
 
@@ -809,7 +1015,7 @@ pub async fn query_streaming_video_info(url: &str) -> std::result::Result<Stream
     })
 }
 
-/// Download a streaming video (e.g. YouTube) with progress tracking and cancellation.
+/// Download a streaming video (YouTube, Facebook, Vimeo, HLS, etc.) with progress tracking and cancellation.
 pub async fn download_streaming_video(
     bin: &Path,
     url: &str,
@@ -817,6 +1023,9 @@ pub async fn download_streaming_video(
     cancel: CancellationToken,
     progress_tx: mpsc::Sender<DownloadProgress>,
     format_selector: Option<&str>,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<PathBuf> {
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -832,7 +1041,7 @@ pub async fn download_streaming_video(
     let fname = final_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
     if fname.eq_ignore_ascii_case("watch") || fname.is_empty() {
         let parent = final_path.parent().unwrap_or(Path::new("."));
-        let default_name = if is_audio { "YouTube_Audio.mp3" } else { "YouTube_Video.mp4" };
+        let default_name = if is_audio { "Video_Audio.mp3" } else { "Video_Download.mp4" };
         final_path = parent.join(default_name);
     } else if !fname.contains('.') {
         final_path.set_extension(if is_audio { "mp3" } else { "mp4" });
@@ -846,9 +1055,28 @@ pub async fn download_streaming_video(
         "--progress-template".to_string(), "postprocess:%(progress.status)s".to_string(),
     ];
 
-    if is_streaming_site(url) {
+    if is_youtube_url(url) {
         args.push("--extractor-args".to_string());
         args.push("youtube:player_client=android,web,default".to_string());
+    }
+
+    if let Some(c) = cookie {
+        if !c.trim().is_empty() {
+            args.push("--add-header".to_string());
+            args.push(format!("Cookie: {}", c.trim()));
+        }
+    }
+    if let Some(r) = referer {
+        if !r.trim().is_empty() {
+            args.push("--referer".to_string());
+            args.push(r.trim().to_string());
+        }
+    }
+    if let Some(ua) = user_agent {
+        if !ua.trim().is_empty() {
+            args.push("--user-agent".to_string());
+            args.push(ua.trim().to_string());
+        }
     }
 
     let ffmpeg_bin = find_ffmpeg_binary();
@@ -1190,6 +1418,10 @@ mod tests {
         assert!(is_streaming_site("https://youtu.be/dQw4w9WgXcQ"));
         assert!(is_streaming_site("https://vimeo.com/12345678"));
         assert!(is_streaming_site("https://www.tiktok.com/@user/video/123"));
+        assert!(is_streaming_site("https://www.facebook.com/reel/123456789"));
+        assert!(is_streaming_site("https://fb.watch/abcd1234/"));
+        assert!(is_streaming_site("https://example.com/live/playlist.m3u8"));
+        assert!(is_streaming_site("https://stream.local.net/video/dash.mpd"));
         assert!(!is_streaming_site("https://example.com/files/archive.zip"));
         assert!(!is_streaming_site("https://filecr.com/file-download/?id=123"));
     }

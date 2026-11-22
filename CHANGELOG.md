@@ -5,6 +5,15 @@ All notable changes to Cosmo Downloader will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.7] - 2026-11-22
+
+### Added
+- **Universal Video Stream Sniffer (IDM-Style):** Intercepts active network media streams (`.m3u8` HLS, `.mpd` DASH, and direct `.mp4`/`.webm`) via browser extension `webRequest` without blocking web traffic.
+- **Facebook & Social Media Video Downloading:** Added full support for Facebook videos & Reels, Instagram, TikTok, Twitter/X, and local/custom streaming video players.
+- **Session Cookies & Header Forwarding:** Automatically captures and passes active browser session cookies and referrers to `yt-dlp` to allow downloading private or login-restricted video streams.
+- **Adaptive Stream Quality Options:** Populates floating download menu with detected HLS/DASH resolutions and provides instant fallback stream options when metadata probing is in-flight.
+- **Dynamic Playback Hooks:** Automatically displays the download pill whenever video playback starts on any web domain.
+
 ## [1.2.6] - 2026-11-22
 
 ### Added

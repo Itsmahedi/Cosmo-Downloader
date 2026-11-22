@@ -525,6 +525,10 @@ impl BridgeServer {
                             || req.starts_with("GET /formats") || req.starts_with("GET /api/formats")
                         {
                             let mut target_url = String::new();
+                            let mut req_cookies: Option<String> = None;
+                            let mut req_referer: Option<String> = None;
+                            let mut req_user_agent: Option<String> = None;
+
                             if req.starts_with("GET ") {
                                 if let Some(first_line) = req.lines().next() {
                                     if let Some(path) = first_line.split_whitespace().nth(1) {
@@ -534,6 +538,14 @@ impl BridgeServer {
                                                     if k == "url" {
                                                         if let Ok(decoded) = percent_encoding::percent_decode_str(v).decode_utf8() {
                                                             target_url = decoded.to_string();
+                                                        }
+                                                    } else if k == "cookies" || k == "cookie" {
+                                                        if let Ok(decoded) = percent_encoding::percent_decode_str(v).decode_utf8() {
+                                                            req_cookies = Some(decoded.to_string());
+                                                        }
+                                                    } else if k == "referer" || k == "referrer" {
+                                                        if let Ok(decoded) = percent_encoding::percent_decode_str(v).decode_utf8() {
+                                                            req_referer = Some(decoded.to_string());
                                                         }
                                                     }
                                                 }
@@ -546,6 +558,15 @@ impl BridgeServer {
                                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
                                     if let Some(u) = val.get("url").and_then(|v| v.as_str()) {
                                         target_url = u.to_string();
+                                    }
+                                    if let Some(c) = val.get("cookies").or_else(|| val.get("cookie")).and_then(|v| v.as_str()) {
+                                        req_cookies = Some(c.to_string());
+                                    }
+                                    if let Some(r) = val.get("referer").or_else(|| val.get("referrer")).and_then(|v| v.as_str()) {
+                                        req_referer = Some(r.to_string());
+                                    }
+                                    if let Some(ua) = val.get("user_agent").and_then(|v| v.as_str()) {
+                                        req_user_agent = Some(ua.to_string());
                                     }
                                 }
                             }
@@ -569,7 +590,12 @@ impl BridgeServer {
                                 return;
                             }
 
-                            match crate::youtube::query_video_formats(&target_url).await {
+                            match crate::youtube::query_video_formats_with_headers(
+                                &target_url,
+                                req_cookies.as_deref(),
+                                req_referer.as_deref(),
+                                req_user_agent.as_deref(),
+                            ).await {
                                 Ok(formats) => {
                                     let resp_json = serde_json::json!({
                                         "success": true,

@@ -1017,7 +1017,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cosmodownloader-cli"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "cosmodownloader-native-host"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4539,7 +4539,7 @@ dependencies = [
 
 [[package]]
 name = "rustget-app"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "chrono",
  "directories 5.0.1",
@@ -4564,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "rustget-core"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "arboard",
  "chrono",
