@@ -17,6 +17,9 @@ use crate::probe::redact_url_for_log;
 /// or points to a streaming manifest / segment (.m3u8, .mpd, blob).
 pub fn is_streaming_site(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
+    if lower.contains("manifest.webmanifest") {
+        return false;
+    }
     lower.contains("youtube.com/")
         || lower.contains("youtu.be/")
         || lower.contains("facebook.com/")
@@ -41,6 +44,9 @@ pub fn is_streaming_site(url: &str) -> bool {
 /// Detect whether a URL is specifically a YouTube video.
 pub fn is_youtube_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
+    if lower.contains("manifest.webmanifest") {
+        return false;
+    }
     lower.contains("youtube.com/") || lower.contains("youtu.be/")
 }
 
@@ -823,6 +829,20 @@ async fn execute_query_video_formats(
     referer: Option<&str>,
     user_agent: Option<&str>,
 ) -> std::result::Result<CompactVideoFormats, String> {
+    let actual_url = if url.contains("manifest.webmanifest") {
+        if let Some(r) = referer {
+            if is_youtube_url(r) {
+                r
+            } else {
+                url
+            }
+        } else {
+            url
+        }
+    } else {
+        url
+    };
+
     let ytdlp = find_ytdlp_binary().ok_or_else(|| "yt-dlp binary not found".to_string())?;
 
     let temp_dir = std::env::temp_dir().join(format!(
@@ -850,7 +870,7 @@ async fn execute_query_video_formats(
         "--no-warnings",
     ]);
 
-    if is_youtube_url(url) {
+    if is_youtube_url(actual_url) {
         cmd.args(["--extractor-args", "youtube:player_client=android,web,default"]);
     }
 
@@ -870,13 +890,13 @@ async fn execute_query_video_formats(
         }
     }
 
-    cmd.arg(url);
+    cmd.arg(actual_url);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let start_probe = Instant::now();
-    let redacted_url = redact_url_for_log(url);
+    let redacted_url = redact_url_for_log(actual_url);
     crate::log_event(&format!("YTDLP: start probe formats for url='{}'", redacted_url));
 
     let output_res = tokio::time::timeout(Duration::from_secs(8), cmd.output()).await;
@@ -892,7 +912,7 @@ async fn execute_query_video_formats(
             ));
             if output.status.success() {
                 if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    let compact = parse_compact_video_formats(&json, url);
+                    let compact = parse_compact_video_formats(&json, actual_url);
                     return Ok(compact);
                 }
                 Err("Failed to parse yt-dlp JSON".to_string())
@@ -905,16 +925,16 @@ async fn execute_query_video_formats(
                 };
 
                 // Fallback for media streams or streaming URLs (e.g. HLS, DASH, direct streams)
-                if is_streaming_site(url) || url.contains(".m3u8") || url.contains(".mpd") {
-                    let fallback_title = if is_youtube_url(url) {
+                if is_streaming_site(actual_url) || actual_url.contains(".m3u8") || actual_url.contains(".mpd") {
+                    let fallback_title = if is_youtube_url(actual_url) {
                         "YouTube Video"
-                    } else if url.contains("facebook.com") || url.contains("fb.watch") {
+                    } else if actual_url.contains("facebook.com") || actual_url.contains("fb.watch") {
                         "Facebook Video"
                     } else {
                         "Web Video Stream"
                     };
                     return Ok(CompactVideoFormats {
-                        video_id: normalize_url_key(url),
+                        video_id: normalize_url_key(actual_url),
                         title: fallback_title.to_string(),
                         duration: 0,
                         is_live: false,
@@ -956,9 +976,9 @@ async fn execute_query_video_formats(
         Ok(Err(e)) => Err(format!("Process error: {}", e)),
         Err(_) => {
             // If probe timed out but URL is a known streaming / media site, return graceful stream option
-            if is_streaming_site(url) || url.contains(".m3u8") || url.contains(".mpd") {
+            if is_streaming_site(actual_url) || actual_url.contains(".m3u8") || actual_url.contains(".mpd") {
                 return Ok(CompactVideoFormats {
-                    video_id: normalize_url_key(url),
+                    video_id: normalize_url_key(actual_url),
                     title: "Web Video Stream".to_string(),
                     duration: 0,
                     is_live: false,
@@ -1027,6 +1047,20 @@ pub async fn download_streaming_video(
     referer: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<PathBuf> {
+    let actual_url = if url.contains("manifest.webmanifest") {
+        if let Some(r) = referer {
+            if is_youtube_url(r) {
+                r
+            } else {
+                url
+            }
+        } else {
+            url
+        }
+    } else {
+        url
+    };
+
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -1055,7 +1089,7 @@ pub async fn download_streaming_video(
         "--progress-template".to_string(), "postprocess:%(progress.status)s".to_string(),
     ];
 
-    if is_youtube_url(url) {
+    if is_youtube_url(actual_url) {
         args.push("--extractor-args".to_string());
         args.push("youtube:player_client=android,web,default".to_string());
     }
@@ -1157,7 +1191,7 @@ pub async fn download_streaming_video(
 
     args.push("-o".to_string());
     args.push(out_template);
-    args.push(url.to_string());
+    args.push(actual_url.to_string());
 
     let mut cmd = Command::new(bin);
     cmd.kill_on_drop(true);
@@ -1172,7 +1206,7 @@ pub async fn download_streaming_video(
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let ytdlp_start = Instant::now();
-    let redacted_url = redact_url_for_log(url);
+    let redacted_url = redact_url_for_log(actual_url);
     crate::log_event(&format!(
         "YTDLP: start download binary='{}' url='{}' args='{}'",
         bin.display(),

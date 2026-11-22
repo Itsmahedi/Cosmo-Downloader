@@ -902,10 +902,13 @@ function triggerDownload(videoEl, format, qualityOption = null) {
 
   const rawPageUrl = window.location.href;
   const pageUrl = normalizeStreamingUrl(rawPageUrl);
+  const isYouTube = pageUrl.includes("youtube.com") || pageUrl.includes("youtu.be");
   const isStreaming = isKnownStreamingSite(pageUrl);
 
   let urlToSend = "";
-  if (qualityOption?._streamUrl) {
+  if (isYouTube) {
+    urlToSend = pageUrl;
+  } else if (qualityOption?._streamUrl) {
     urlToSend = qualityOption._streamUrl;
   } else if (detectedMediaStreams.length > 0 && (!videoUrl || videoUrl.startsWith("blob:"))) {
     urlToSend = detectedMediaStreams[0].url;

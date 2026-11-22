@@ -612,9 +612,11 @@ function isMediaStreamRequest(url, headers) {
   if (!url || typeof url !== "string") return null;
   const lowerUrl = url.toLowerCase();
 
-  // Exclude internal / bridge / telemetry / ad URLs
+  // Exclude internal / bridge / telemetry / ad / manifest URLs
   if (lowerUrl.includes("127.0.0.1:42424") || lowerUrl.includes("localhost:42424")) return null;
   if (lowerUrl.includes("google-analytics.com") || lowerUrl.includes("doubleclick.net")) return null;
+  if (lowerUrl.includes(".webmanifest") || lowerUrl.includes("manifest.json") || lowerUrl.includes("/manifest")) return null;
+  if (lowerUrl.includes("youtube.com") || lowerUrl.includes("youtu.be") || lowerUrl.includes("googlevideo.com")) return null;
 
   let contentType = "";
   let contentLength = 0;
@@ -640,16 +642,12 @@ function isMediaStreamRequest(url, headers) {
   }
 
   // 3. Direct video streams (.mp4, .webm, .m4v, .flv, .mov, or video/* mime)
-  const isVideoExt = lowerUrl.includes(".mp4") || lowerUrl.includes(".webm") || lowerUrl.includes(".m4v") || lowerUrl.includes(".flv") || lowerUrl.includes(".mov");
+  const isVideoExt = /\.(mp4|webm|m4v|flv|mov|mkv)(\?|$)/i.test(lowerUrl);
   const isVideoMime = contentType.startsWith("video/") && !contentType.includes("mp2t");
 
   if (isVideoExt || isVideoMime) {
     if (contentLength > 0 && contentLength < 120000) {
       return null; // Ignore tiny tracking video icons
-    }
-    // Filter out YouTube internal chunk requests (YouTube is handled natively by yt-dlp)
-    if (lowerUrl.includes("googlevideo.com/videoplayback")) {
-      return null;
     }
     return { type: "video", mime: contentType || "video/mp4", size: contentLength };
   }
