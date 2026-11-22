@@ -3,7 +3,7 @@ name = "rustget-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core multi-segment resume-capable download engine for RustGet"
+description = "Core multi-segment resume-capable download engine for Cosmo Downloader"
 
 [dependencies]
 tokio = { workspace = true }

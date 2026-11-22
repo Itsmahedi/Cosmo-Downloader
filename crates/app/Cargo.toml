@@ -3,19 +3,11 @@ name = "rustget-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Windows 11 graphical user interface for RustGet"
+description = "Windows 11 graphical user interface for Cosmo Downloader"
 
 [[bin]]
 name = "CosmoDownloader"
 path = "src/main.rs"
-
-[[bin]]
-name = "spike-viewport"
-path = "src/bin/spike_viewport.rs"
-
-[[bin]]
-name = "rustget-gui"
-path = "src/bin/rustget-gui.rs"
 
 [dependencies]
 rustget-core = { path = "../core" }

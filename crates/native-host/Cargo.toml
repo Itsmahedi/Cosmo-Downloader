@@ -9,10 +9,6 @@ description = "Native messaging host bridge for Chrome, Edge, and Firefox"
 name = "cosmodownloader-host"
 path = "src/main.rs"
 
-[[bin]]
-name = "rustget-host"
-path = "src/bin/rustget-host.rs"
-
 [dependencies]
 rustget-core = { path = "../core" }
 tokio = { workspace = true }
