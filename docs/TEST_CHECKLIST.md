@@ -9,7 +9,7 @@ Use this checklist to verify releases across the desktop app (`CosmoDownloader.e
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` — 0 warnings across workspace & manifests
 - [ ] `npm run lint:css` — 0 Stylelint errors across `browser-extensions/**/*.css`
 - [ ] `npm test` — all Playwright/Node extension regression tests pass (`tests/*.test.mjs`)
-- [ ] Extension manifests validated cleanly as JSON (`Chrome-Edge-Brave-Opera/manifest.json` `1.2.7`, `Mozilla-Firefox/manifest.json` `1.10.4`)
+- [ ] Extension manifests validated cleanly as JSON (`Chrome-Edge-Brave-Opera/manifest.json` `1.2.8`, `Mozilla-Firefox/manifest.json` `1.10.7`)
 
 ## 2. Desktop App Features & Download Engine
 - [ ] Add download with valid HTTP/HTTPS URL (default & custom save path)
@@ -47,10 +47,10 @@ Use this checklist to verify releases across the desktop app (`CosmoDownloader.e
 - [ ] Fallback: when desktop app + native host are unavailable, browser download resumes and completes normally; `blob:` / `data:` URLs stay in browser
 
 ## 5. Installer, Upgrade, Downgrade & Uninstall
-- [ ] Running installer (`CosmoDownloader-Setup-v1.2.7.exe` or `/SILENT`) while old version is running (visible, minimized to tray, or helper processes active):
+- [ ] Running installer (`CosmoDownloader-Setup-v1.2.8.exe` or `/SILENT`) while old version is running (visible, minimized to tray, or helper processes active):
   - Prompts clearly `"Cosmo Downloader is running. It will be closed to continue."` (interactive)
   - Sends `--quit` for graceful state save, falls back to forceful termination after timeout if old version refuses
   - Completes with Exit Code `0`, preserves SQLite DB & settings/downloads, and automatically relaunches if previously running
 - [ ] Downgrade from newer version prompts confirmation cleanly
-- [ ] Apps & Features / Add or Remove Programs displays `Cosmo Downloader`, version `1.2.7`, publisher `Mahedi`, and app icon
+- [ ] Apps & Features / Add or Remove Programs displays `Cosmo Downloader`, version `1.2.8`, publisher `Mahedi`, and app icon
 - [ ] Uninstall closes running app, removes binaries, shortcuts, `Run` startup entry, and all browser `NativeMessagingHosts` keys, keeps downloaded files, and prompts before deleting `%LOCALAPPDATA%\CosmoDownloader` settings/history

@@ -5,6 +5,17 @@ All notable changes to Cosmo Downloader will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.8] - 2026-11-23
+
+### Added
+- **End-to-End Quality & Format Selection Propagation:** Browser extension quality and `format_id` selections now flow cleanly through `DownloadDialogRequest` and `DownloadWindowState::apply_requested_quality` into `yt-dlp` via `combine_format_selector()` and `build_ytdlp_format_args()`, including automatic `.mp3` / `Music` category routing for audio-only selections and per-window `Cookie`, `Referer`, and `User-Agent` preservation.
+- **Workspace Storage Hygiene:** Added `scripts/clean-workspace.sh` to prune stale workspace crate artifacts, `installer/dist/` staging files, and temporary test directories, alongside lean `[profile.dev]` debug symbol settings in `Cargo.toml`.
+
+### Fixed
+- **Extension Video Pill & Quality Menu Polish:** Switched the floating download pill and dropdown header to an inline SVG Cosmo logo (`createCosmoLogoSvg`), widened the quality menu (`220px`–`340px`) with non-wrapping single-line rows, deduplicated size/`Auto` metadata labels, and removed the lingering `.sent` pill state.
+- **Extension Context-Invalidation Cleanup:** Added `isExtensionContextInvalidated()` and `stopScannerIfInvalidated()` guards so content scripts cleanly disconnect `MutationObserver` and clear timers when an extension is reloaded or updated.
+- **Firefox Extension Sync:** Synchronized Firefox Manifest V3 extension (`v1.10.7`) with the updated Chromium extension UI and content scripts.
+
 ## [1.2.7] - 2026-11-22
 
 ### Added

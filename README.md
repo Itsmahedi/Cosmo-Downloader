@@ -1,4 +1,4 @@
-# Cosmo Downloader v1.2.7
+# Cosmo Downloader v1.2.8
 
 A fast, reliable multi-segment desktop download manager for **Windows 10 and Windows 11**, paired with browser extensions for Google Chrome, Microsoft Edge, Brave, Opera, and Mozilla Firefox.
 
@@ -18,20 +18,20 @@ A fast, reliable multi-segment desktop download manager for **Windows 10 and Win
   - Invisible host + on-demand dashboard architecture with system tray icon, single-instance mutex forwarding, and CLI (`cosmodownloader-cli.exe`).
   - Persistent SQLite history & settings (`%LOCALAPPDATA%\CosmoDownloader\CosmoDownloader\data\cosmodownloader.db`) and logs (`%LOCALAPPDATA%\CosmoDownloader\CosmoDownloader\logs\cosmodownloader.log`).
 - **Browser Extension Integration**:
-  - Unified Chromium Manifest V3 extension (`v1.2.7`) and Mozilla Firefox Manifest V3 extension (`v1.10.4` via AMO).
+  - Unified Chromium Manifest V3 extension (`v1.2.8`) and Mozilla Firefox Manifest V3 extension (`v1.10.7` via AMO).
   - Real-time loopback `/health` probing with a 3-state connection badge (`Connected`, `App Closed`, `Host Missing`), 1-click desktop app launch via Native Messaging (`cosmodownloader-host.exe`), configurable extension/size/domain filters, and safe browser download fallback if the desktop app is unavailable.
 
 ---
 
 ## Windows Installation & In-Place Upgrades
 
-1. Download and run **`CosmoDownloader-Setup-v1.2.7.exe`** (built from [`installer/cosmodownloader.iss`](installer/cosmodownloader.iss) via Inno Setup 6), or run the standalone **`CosmoDownloader.exe`** / portable **`CosmoDownloader-v1.2.7-windows-x64.zip`** in [`dist/`](dist/).
+1. Download and run **`CosmoDownloader-Setup-v1.2.8.exe`** (built from [`installer/cosmodownloader.iss`](installer/cosmodownloader.iss) via Inno Setup 6), or run the standalone **`CosmoDownloader.exe`** / portable **`CosmoDownloader-v1.2.8-windows-x64.zip`** in [`dist/`](dist/).
 2. Upgrading over a running installation:
    - Setup detects running Cosmo Downloader processes, sends `--quit` for a clean queue flush (with a 5s wait and `taskkill` fallback), backs up the SQLite database, installs cleanly, and automatically relaunches Cosmo Downloader if it was running prior to the update.
    - User database, queue state, and settings in `%LOCALAPPDATA%\CosmoDownloader` are preserved automatically.
 3. Silent install / update:
    ```cmd
-   CosmoDownloader-Setup-v1.2.7.exe /VERYSILENT /NORESTART
+   CosmoDownloader-Setup-v1.2.8.exe /VERYSILENT /NORESTART
    ```
 
 ---
@@ -40,11 +40,11 @@ A fast, reliable multi-segment desktop download manager for **Windows 10 and Win
 
 Extension source folders live in [`browser-extensions/`](browser-extensions/):
 
-- **Chrome / Brave / Microsoft Edge / Opera (`v1.2.7`)**:
+- **Chrome / Brave / Microsoft Edge / Opera (`v1.2.8`)**:
   1. Open `chrome://extensions`, `brave://extensions`, `edge://extensions`, or `opera://extensions`.
-  2. Enable **Developer mode**, click **Load unpacked**, and select [`browser-extensions/Chrome-Edge-Brave-Opera`](browser-extensions/Chrome-Edge-Brave-Opera) (or extract `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.7.zip`).
+  2. Enable **Developer mode**, click **Load unpacked**, and select [`browser-extensions/Chrome-Edge-Brave-Opera`](browser-extensions/Chrome-Edge-Brave-Opera) (or extract `CosmoDownloader-Chrome-Edge-Brave-Opera-Extension-v1.2.8.zip`).
   3. The manifest public key pins extension ID `lbifcbhmdjlhmcfipfdodbdljmcbdanf` across unpacked installs so the installed native messaging host matches automatically.
-- **Mozilla Firefox (`v1.10.4`, Manifest V3)**:
+- **Mozilla Firefox (`v1.10.7`, Manifest V3)**:
   1. Install from Mozilla Add-ons (AMO), or for local testing open `about:debugging#/runtime/this-firefox`.
   2. Click **Load Temporary Add-on...** and select [`browser-extensions/Mozilla-Firefox/manifest.json`](browser-extensions/Mozilla-Firefox/manifest.json).
 
@@ -60,13 +60,13 @@ cosmo_downloader/
 │   ├── cli/                # cosmodownloader-cli.exe CLI utility
 │   └── native-host/        # cosmodownloader-host.exe browser native messaging bridge
 ├── browser-extensions/
-│   ├── Chrome-Edge-Brave-Opera/   # Unified Chromium Manifest V3 extension (v1.2.7)
-│   └── Mozilla-Firefox/           # Firefox Manifest V3 extension (v1.10.4)
+│   ├── Chrome-Edge-Brave-Opera/   # Unified Chromium Manifest V3 extension (v1.2.8)
+│   └── Mozilla-Firefox/           # Firefox Manifest V3 extension (v1.10.7)
 ├── installer/              # Inno Setup script (cosmodownloader.iss) & release packager (build-release.ps1)
 ├── scripts/                # Deployment, signing, extension sync, XPI packaging & stress scripts
 ├── tests/                  # Playwright & Node extension test suite + Windows smoke test
 ├── docs/                   # QA checklist & window architecture contract
-├── dist/                   # Latest compiled v1.2.7 release artifacts
+├── dist/                   # Latest compiled v1.2.8 release artifacts
 ├── CHANGELOG.md
 ├── RELEASE_NOTES.md
 └── LICENSE

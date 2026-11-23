@@ -31,11 +31,11 @@ Use this fast-lookup table to pinpoint the exact file for any feature or task:
 | **Core Exports & Module Tree** | [`crates/core/src/lib.rs`](../crates/core/src/lib.rs) | Public `rustget_core` re-exports, `version`, `log_event` |
 | **Browser Native Messaging Host** | [`crates/native-host/src/lib.rs`](../crates/native-host/src/lib.rs) | `run`, `ExtensionMessage`, `HostResponse`, `--register`, `--unregister` |
 | **Command Line Interface (CLI)** | [`crates/cli/src/lib.rs`](../crates/cli/src/lib.rs) | `Cli`, `Commands` |
-| **Chromium Extension (MV3 `v1.2.7`)** | [`browser-extensions/Chrome-Edge-Brave-Opera/`](../browser-extensions/Chrome-Edge-Brave-Opera/) | `manifest.json`, `background.js`, `content.js`, `popup.js`, native host `.json`s |
-| **Firefox Extension (MV3 `v1.10.4`)** | [`browser-extensions/Mozilla-Firefox/`](../browser-extensions/Mozilla-Firefox/) | `manifest.json`, `background.js`, `content.js`, `popup.js`, `com.cosmodownloader.downloader.firefox.json` |
+| **Chromium Extension (MV3 `v1.2.8`)** | [`browser-extensions/Chrome-Edge-Brave-Opera/`](../browser-extensions/Chrome-Edge-Brave-Opera/) | `manifest.json`, `background.js`, `content.js`, `popup.js`, native host `.json`s |
+| **Firefox Extension (MV3 `v1.10.7`)** | [`browser-extensions/Mozilla-Firefox/`](../browser-extensions/Mozilla-Firefox/) | `manifest.json`, `background.js`, `content.js`, `popup.js`, `com.cosmodownloader.downloader.firefox.json` |
 | **Inno Setup Windows Installer** | [`installer/cosmodownloader.iss`](../installer/cosmodownloader.iss) | Inno Setup directives, registry entries, shortcuts, upgrade hooks |
 | **Release Build Automation** | [`installer/build-release.ps1`](../installer/build-release.ps1) | Cargo release build, Authenticode signing, portable zip & Inno packaging |
-| **Active Utility & Test Scripts** | [`scripts/`](../scripts/) | `deploy_binaries.ps1`, `sign.ps1`, `verify_signatures.ps1`, `sync-extensions.mjs`, `build_xpi.ps1`, `stress.ps1` |
+| **Active Utility & Test Scripts** | [`scripts/`](../scripts/) | `clean-workspace.sh`, `deploy_binaries.ps1`, `sign.ps1`, `verify_signatures.ps1`, `sync-extensions.mjs`, `build_xpi.ps1`, `stress.ps1` |
 | **Extension & Window Tests** | [`tests/`](../tests/), [`crates/app/tests/`](../crates/app/tests/), [`crates/core/tests/`](../crates/core/tests/) | Playwright/Node tests, `window_gate_test.rs`, `audit_tests.rs`, `integration_tests.rs` |
 
 ---
@@ -109,13 +109,13 @@ cosmo_downloader/
 │   └── skills/                             # Workspace skills (copy-build-to-desktop, m3-design, m3-expressive, repo-sync-and-release)
 ├── .agents                                 # Symlink to .agent/
 ├── .github/workflows/release.yml           # CI release build, Authenticode signing & verification
-├── Cargo.toml                              # Workspace root (v1.2.7)
+├── Cargo.toml                              # Workspace root (v1.2.8)
 ├── Cargo.lock                              # Dependency lockfile
-├── package.json                            # Node/Playwright test & Stylelint scripts (v1.2.7)
+├── package.json                            # Node/Playwright test & Stylelint scripts (v1.2.8)
 ├── LICENSE                                 # MIT License
-├── README.md                               # User-facing documentation (v1.2.7)
+├── README.md                               # User-facing documentation (v1.2.8)
 ├── CHANGELOG.md                            # Release history
-├── RELEASE_NOTES.md                        # Current release notes (v1.2.7)
+├── RELEASE_NOTES.md                        # Current release notes (v1.2.8)
 ├── icon.ico                                # Main application icon (multi-resolution Windows ICO)
 ├── assets/                                 # Canonical SVG & PNG logo source assets
 ├── ffmpeg.exe                              # Bundled ffmpeg binary (gitignored)
@@ -148,20 +148,21 @@ cosmo_downloader/
 │       └── src/                            # main.rs, lib.rs
 │
 ├── browser-extensions/
-│   ├── Chrome-Edge-Brave-Opera/            # Chromium Manifest V3 extension (v1.2.7) + Chrome/Edge/Firefox native manifests
-│   └── Mozilla-Firefox/                    # Firefox Manifest V3 extension (v1.10.4) + Firefox native manifest
+│   ├── Chrome-Edge-Brave-Opera/            # Chromium Manifest V3 extension (v1.2.8) + Chrome/Edge/Firefox native manifests
+│   └── Mozilla-Firefox/                    # Firefox Manifest V3 extension (v1.10.7) + Firefox native manifest
 │
 ├── docs/
 │   ├── TEST_CHECKLIST.md                   # Manual & automated Windows QA checklist
 │   └── window-rules.md                     # Invisible host & show_main_window gate contract
 │
 ├── installer/
-│   ├── cosmodownloader.iss                 # Inno Setup script (v1.2.7)
+│   ├── cosmodownloader.iss                 # Inno Setup script (v1.2.8)
 │   ├── build-release.ps1                   # Automated release build, sign & packaging script
 │   └── icon.ico                            # Installer wizard icon
 │
 ├── scripts/                                # Active build, signing, deploy & test utilities
 │   ├── build_xpi.ps1                       # Packages Firefox extension .zip / .xpi
+│   ├── clean-workspace.sh                  # Prunes stale Rust target/ artifacts & temp files
 │   ├── copy_build.ps1 / copy_build.sh      # Copies latest build to Windows Desktop
 │   ├── deploy_binaries.ps1 / update-app.ps1# Atomic in-place deployment & update
 │   ├── rickroll-test.mjs                   # End-to-end Playwright YouTube extension test
@@ -170,7 +171,7 @@ cosmo_downloader/
 │   └── sync-extensions.mjs                 # Syncs shared JS/HTML/CSS to Mozilla-Firefox
 │
 ├── tests/                                  # Node/Playwright extension tests & windows_smoke.ps1
-└── dist/                                   # Latest v1.2.7 / Firefox v1.10.4 release artifacts
+└── dist/                                   # Latest v1.2.8 / Firefox v1.10.7 release artifacts
 ```
 
 ---
