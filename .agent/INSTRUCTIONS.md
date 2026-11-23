@@ -86,5 +86,11 @@ Windows: .exe
 Browser: updated extension (with no mention of Linux anywhere in its text)
 
 7. Always create a new Firefox extension ZIP after every code update and save it in C:\Users\steam\OneDrive\Documents\cosmo_downloader\browser-extensions.
-Automatically update the version (current: 1.10.4), verify the new ZIP, then delete old ZIP files. Keep only the latest verified ZIP. Never delete source files.
+Automatically update the version (current: 1.10.7), verify the new ZIP, then delete old ZIP files. Keep only the latest verified ZIP. Never delete source files.
+
+8. Keep Workspace & Build Storage Clean
+- After building, testing, or deploying, run `./scripts/clean-workspace.sh` to prune stale workspace crate artifacts, `installer/dist/` staging files, and `/tmp` test/probe leftovers (it automatically runs a full `cargo clean` if `target/` exceeds 4 GB).
+- After any version bump or GitHub Release publish, run `./scripts/clean-workspace.sh --full` to wipe hashed artifacts from old versions.
+- Keep `[profile.dev]` (`debug = "line-tables-only"`) and `[profile.dev.package."*"]` (`debug = 0`) in `Cargo.toml` so debug/test binaries do not bloat.
+- Keep `target/` under 4 GB and `/tmp` free of stale `cosmo_probe_*` / `cosmo_test*` / Playwright directories.
 

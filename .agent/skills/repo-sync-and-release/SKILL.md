@@ -2,9 +2,9 @@
 name: repo-sync-and-release
 description: >-
   Keep the Itsmahedi/Cosmo-Downloader GitHub repository clean, synced, and up to date after every
-  change, and ensure only the latest verified release artifacts are uploaded to GitHub Releases.
-  Use whenever finishing feature work, cleaning up files, bumping versions, updating docs, pushing
-  commits, or publishing/updating GitHub Releases.
+  change, prune stale Rust build artifacts and temp caches, and ensure only the latest verified
+  release artifacts are uploaded to GitHub Releases. Use whenever finishing feature work, cleaning
+  up files, bumping versions, updating docs, pushing commits, or publishing/updating GitHub Releases.
 ---
 
 # Repo Sync & GitHub Release Workflow
@@ -31,6 +31,7 @@ After every feature, bugfix, cleanup, or version bump:
    - Update `README.md`, `CHANGELOG.md`, `RELEASE_NOTES.md`, `docs/TEST_CHECKLIST.md`, `LICENSE`, and `.agent/MINDMAP.md` whenever behavior, paths, scripts, or versions change.
 3. **Keep only the latest artifacts on disk**:
    - Prune old version builds, duplicate zips, and scratch files from `dist/` and `installer/dist/` so only the latest verified `vX.Y.Z` (and Firefox `v1.10.X`) files remain.
+   - Prune accumulated Rust build outputs in `target/` and temporary `/tmp` test files using `./scripts/clean-workspace.sh` (or `./scripts/clean-workspace.sh --full` after releases/version bumps).
 
 ## 2. Verify, Commit in Logical Chunks & Push
 
@@ -92,3 +93,33 @@ gh release upload vX.Y.Z --clobber --repo Itsmahedi/Cosmo-Downloader \
 gh release view vX.Y.Z --repo Itsmahedi/Cosmo-Downloader --json assets -q '.assets[].name'
 # gh release delete-asset vX.Y.Z <old-asset-name> --yes --repo Itsmahedi/Cosmo-Downloader
 ```
+
+## 4. Keep Build & WSL Storage Clean (Mandatory)
+
+Cargo never deletes old build hashes automatically—version bumps, feature flags, and test targets each leave ~400 MB unstripped binaries/test outputs inside `target/`. Left unchecked, `target/` and `/tmp` probe folders rapidly consume tens of gigabytes inside WSL's `ext4.vhdx`.
+
+1. **Prune after normal feature/test work:**
+   ```bash
+   ./scripts/clean-workspace.sh
+   ```
+   - Cleans workspace crate artifacts (`rustget-app`, `rustget-core`, `cosmodownloader-cli`, `cosmodownloader-native-host`) while keeping dependency build caches for fast rebuilds.
+   - Automatically triggers a full `cargo clean` whenever `target/` exceeds `4096 MiB` (override with `--max-mb <N>`).
+   - Removes `installer/dist/` staging files and stale `/tmp` test/probe/Playwright leftovers without touching `dist/`.
+
+2. **Full clean after every version bump or GitHub Release publish:**
+   ```bash
+   ./scripts/clean-workspace.sh --full
+   ```
+   - Version bumps change Cargo fingerprint hashes across every crate, leaving older version artifacts orphaned; always run `--full` once release assets in `dist/` are verified and uploaded.
+
+3. **Keep dev debug symbols lean in `Cargo.toml`:**
+   - Never remove `[profile.dev]` (`debug = "line-tables-only"`) or `[profile.dev.package."*"]` (`debug = 0`) from `Cargo.toml`. This strips heavy DWARF debug info from third-party crates while keeping file/line panic backtraces for workspace code.
+
+4. **WSL `ext4.vhdx` compaction reminder (Windows side only):**
+   - **Never** run `wsl --shutdown` from inside WSL.
+   - Enable sparse VHD mode once from an Administrator Windows PowerShell so deleted Linux files automatically shrink `ext4.vhdx`:
+     ```powershell
+     wsl --shutdown
+     wsl --manage archlinux --set-sparse true
+     ```
+   - If `ext4.vhdx` was not sparse before cleanup, compact it from an Administrator Windows PowerShell using `diskpart` (`attach vdisk readonly`, `compact vdisk`, `detach vdisk`).
