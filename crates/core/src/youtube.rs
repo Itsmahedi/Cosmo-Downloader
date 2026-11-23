@@ -940,7 +940,7 @@ async fn execute_query_video_formats(
                         is_live: false,
                         qualities: vec![
                             VideoQualityOption {
-                                label: "Best Available (Auto)".to_string(),
+                                label: "Best Video".to_string(),
                                 format: "best".to_string(),
                                 height: None,
                                 format_id: "best".to_string(),
@@ -959,7 +959,7 @@ async fn execute_query_video_formats(
                             is_approx: false,
                         }),
                         best: Some(VideoQualityOption {
-                            label: "Best Available (MP4)".to_string(),
+                            label: "Best available".to_string(),
                             format: "best".to_string(),
                             height: None,
                             format_id: "best".to_string(),
@@ -984,7 +984,7 @@ async fn execute_query_video_formats(
                     is_live: false,
                     qualities: vec![
                         VideoQualityOption {
-                            label: "Best Available (Auto)".to_string(),
+                            label: "Best Video".to_string(),
                             format: "best".to_string(),
                             height: None,
                             format_id: "best".to_string(),
@@ -1003,7 +1003,7 @@ async fn execute_query_video_formats(
                         is_approx: false,
                     }),
                     best: Some(VideoQualityOption {
-                        label: "Best Available (MP4)".to_string(),
+                        label: "Best available".to_string(),
                         format: "best".to_string(),
                         height: None,
                         format_id: "best".to_string(),
@@ -1033,6 +1033,213 @@ pub async fn query_streaming_video_info(url: &str) -> std::result::Result<Stream
         filename,
         filesize_approx,
     })
+}
+
+/// Combine an optional yt-dlp `format_id` and user-requested `quality` label into a single
+/// persisted selector string (`"audio"`, `"audio:<fid>"`, `"<fid>|<H>p"`, `"<H>p"`, `"<fid>"`, or `"best"`).
+pub fn combine_format_selector(format_id: Option<&str>, quality: Option<&str>) -> Option<String> {
+    let q_trim = quality.map(str::trim).filter(|s| !s.is_empty());
+    let norm_q = q_trim.and_then(|q| {
+        let low = q.to_ascii_lowercase();
+        if low == "audio" || low == "audio only" {
+            Some("audio".to_string())
+        } else if low == "best"
+            || low == "best available"
+            || low == "best quality"
+            || low == "stream"
+            || low.starts_with("auto")
+            || low.starts_with("best (")
+        {
+            Some("best".to_string())
+        } else if low.ends_with('p')
+            && low.len() > 1
+            && low[..low.len() - 1].chars().all(|c| c.is_ascii_digit())
+        {
+            Some(low)
+        } else if !q.chars().any(char::is_whitespace) {
+            Some(q.to_string())
+        } else {
+            None
+        }
+    });
+
+    let concrete_fid = format_id.map(str::trim).filter(|fid| {
+        if fid.is_empty() || fid.chars().any(char::is_whitespace) {
+            return false;
+        }
+        let low = fid.to_ascii_lowercase();
+        low != "best" && low != "audio" && low != "bestaudio"
+    });
+
+    match norm_q.as_deref() {
+        Some("audio") => Some(match concrete_fid {
+            Some(fid) => format!("audio:{}", fid),
+            None => "audio".to_string(),
+        }),
+        Some(q)
+            if q.ends_with('p')
+                && q.len() > 1
+                && q[..q.len() - 1].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            Some(match concrete_fid {
+                Some(fid) => format!("{}|{}", fid, q),
+                None => q.to_string(),
+            })
+        }
+        Some("best") => Some(match concrete_fid {
+            Some(fid) => fid.to_string(),
+            None => "best".to_string(),
+        }),
+        Some(other) => Some(match concrete_fid {
+            Some(fid) => fid.to_string(),
+            None => other.to_string(),
+        }),
+        None => concrete_fid.map(str::to_string),
+    }
+}
+
+/// Build the `-f` / `-x` / `--merge-output-format` arguments for `yt-dlp`, returning `(args, extract_mp3)`.
+pub fn build_ytdlp_format_args(
+    format_selector: Option<&str>,
+    is_audio_ext: bool,
+    has_ffmpeg: bool,
+) -> (Vec<String>, bool) {
+    let clean_fs = format_selector.map(str::trim).filter(|s| !s.is_empty());
+    let fs_lower = clean_fs.map(|s| s.to_ascii_lowercase());
+    let is_audio = is_audio_ext
+        || fs_lower
+            .as_deref()
+            .map(|s| {
+                s == "audio"
+                    || s == "audio only"
+                    || s == "bestaudio"
+                    || s.starts_with("audio:")
+            })
+            .unwrap_or(false);
+
+    let mut args = Vec::new();
+    let mut extract_mp3 = false;
+
+    if is_audio {
+        if let Some(fs) = clean_fs {
+            if let Some((_, fid)) = fs.split_once(':') {
+                let fid = fid.trim();
+                if !fid.is_empty() && !fid.chars().any(char::is_whitespace) {
+                    args.push("-f".to_string());
+                    args.push(format!("{fid}/bestaudio/best"));
+                } else {
+                    args.push("-f".to_string());
+                    args.push("bestaudio/best".to_string());
+                }
+            } else {
+                let low = fs.to_ascii_lowercase();
+                if low != "audio"
+                    && low != "audio only"
+                    && low != "best"
+                    && low != "bestaudio"
+                    && !fs.chars().any(char::is_whitespace)
+                {
+                    args.push("-f".to_string());
+                    args.push(format!("{fs}/bestaudio/best"));
+                } else {
+                    args.push("-f".to_string());
+                    args.push("bestaudio/best".to_string());
+                }
+            }
+        } else {
+            args.push("-f".to_string());
+            args.push("bestaudio/best".to_string());
+        }
+
+        if has_ffmpeg {
+            args.push("-x".to_string());
+            args.push("--audio-format".to_string());
+            args.push("mp3".to_string());
+            extract_mp3 = true;
+        }
+        return (args, extract_mp3);
+    }
+
+    if let Some(fs) = clean_fs {
+        let low = fs.to_ascii_lowercase();
+        if let Some((fid, res_part)) = fs.split_once('|') {
+            let fid = fid.trim();
+            let res_low = res_part.trim().to_ascii_lowercase();
+            let height_opt = res_low
+                .strip_suffix('p')
+                .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
+            if !fid.is_empty() && !fid.chars().any(char::is_whitespace) {
+                if let Some(h) = height_opt {
+                    if has_ffmpeg {
+                        args.push("-f".to_string());
+                        args.push(format!(
+                            "{fid}/bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+                        ));
+                        args.push("--merge-output-format".to_string());
+                        args.push("mp4".to_string());
+                    } else {
+                        args.push("-f".to_string());
+                        args.push(format!("{fid}/best[height<={h}][ext=mp4]/best[height<={h}]/best"));
+                    }
+                    return (args, false);
+                }
+            }
+        }
+
+        if low.ends_with('p')
+            && low.len() > 1
+            && low[..low.len() - 1].chars().all(|c| c.is_ascii_digit())
+        {
+            let h = &low[..low.len() - 1];
+            if has_ffmpeg {
+                args.push("-f".to_string());
+                args.push(format!(
+                    "bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+                ));
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push("-f".to_string());
+                args.push(format!("best[height<={h}][ext=mp4]/best[height<={h}]/best"));
+            }
+        } else if low == "best"
+            || low == "best available"
+            || low == "best quality"
+            || low == "stream"
+            || low.starts_with("auto")
+            || low.starts_with("best (")
+            || fs.chars().any(char::is_whitespace)
+        {
+            if has_ffmpeg {
+                args.push("-f".to_string());
+                args.push("bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best".to_string());
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push("-f".to_string());
+                args.push("best[ext=mp4]/best".to_string());
+            }
+        } else {
+            args.push("-f".to_string());
+            if has_ffmpeg {
+                args.push(format!("{fs}/bestvideo+bestaudio/best"));
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push(format!("{fs}/best"));
+            }
+        }
+    } else if has_ffmpeg {
+        args.push("-f".to_string());
+        args.push("bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best".to_string());
+        args.push("--merge-output-format".to_string());
+        args.push("mp4".to_string());
+    } else {
+        args.push("-f".to_string());
+        args.push("best[ext=mp4]/best".to_string());
+    }
+
+    (args, false)
 }
 
 /// Download a streaming video (YouTube, Facebook, Vimeo, HLS, etc.) with progress tracking and cancellation.
@@ -1068,19 +1275,34 @@ pub async fn download_streaming_video(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
 
+    let ffmpeg_bin = find_ffmpeg_binary();
     let target_ext = output_path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let is_audio = target_ext.eq_ignore_ascii_case("mp3");
+    let (format_args, extract_mp3) = build_ytdlp_format_args(format_selector, is_audio, ffmpeg_bin.is_some());
 
     let mut final_path = output_path.to_path_buf();
     let fname = final_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
     if fname.eq_ignore_ascii_case("watch") || fname.is_empty() {
         let parent = final_path.parent().unwrap_or(Path::new("."));
-        let default_name = if is_audio { "Video_Audio.mp3" } else { "Video_Download.mp4" };
+        let default_name = if is_audio || extract_mp3 { "Video_Audio.mp3" } else { "Video_Download.mp4" };
         final_path = parent.join(default_name);
     } else if !fname.contains('.') {
-        final_path.set_extension(if is_audio { "mp3" } else { "mp4" });
+        final_path.set_extension(if is_audio || extract_mp3 { "mp3" } else { "mp4" });
+    } else if extract_mp3 {
+        final_path.set_extension("mp3");
     }
-    let out_template = final_path.to_string_lossy().to_string();
+
+    let out_template = if extract_mp3 {
+        let parent = final_path.parent().unwrap_or(Path::new("."));
+        let stem = final_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Video_Audio");
+        parent.join(format!("{}.%(ext)s", stem)).to_string_lossy().to_string()
+    } else {
+        final_path.to_string_lossy().to_string()
+    };
 
     let mut args = vec![
         "-N".to_string(), "8".to_string(),
@@ -1113,82 +1335,12 @@ pub async fn download_streaming_video(
         }
     }
 
-    let ffmpeg_bin = find_ffmpeg_binary();
     if let Some(ref ffmpeg_path) = ffmpeg_bin {
         args.push("--ffmpeg-location".to_string());
         args.push(ffmpeg_path.to_string_lossy().to_string());
     }
 
-    if is_audio {
-        if let Some(fs) = format_selector {
-            if fs != "audio" && fs != "best" {
-                args.push("-f".to_string());
-                args.push(format!("{fs}/bestaudio/best"));
-            } else if ffmpeg_bin.is_some() {
-                args.push("-x".to_string());
-                args.push("--audio-format".to_string());
-                args.push("mp3".to_string());
-            } else {
-                args.push("-f".to_string());
-                args.push("bestaudio/best".to_string());
-            }
-        } else if ffmpeg_bin.is_some() {
-            args.push("-x".to_string());
-            args.push("--audio-format".to_string());
-            args.push("mp3".to_string());
-        } else {
-            args.push("-f".to_string());
-            args.push("bestaudio/best".to_string());
-        }
-    } else {
-        if let Some(fs) = format_selector {
-            if fs.contains('+') || fs.chars().all(|c| c.is_ascii_digit()) {
-                args.push("-f".to_string());
-                args.push(format!("{fs}/bestvideo+bestaudio/best"));
-                if ffmpeg_bin.is_some() {
-                    args.push("--merge-output-format".to_string());
-                    args.push("mp4".to_string());
-                }
-            } else if fs.ends_with('p') && fs[..fs.len() - 1].chars().all(|c| c.is_ascii_digit()) {
-                let h = &fs[..fs.len() - 1];
-                if ffmpeg_bin.is_some() {
-                    args.push("-f".to_string());
-                    args.push(format!("bestvideo[height<={}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={}]+bestaudio/best[height<={}]/best", h, h, h));
-                    args.push("--merge-output-format".to_string());
-                    args.push("mp4".to_string());
-                } else {
-                    args.push("-f".to_string());
-                    args.push(format!("best[height<={}][ext=mp4]/best[height<={}]/best", h, h));
-                }
-            } else if fs == "best" {
-                if ffmpeg_bin.is_some() {
-                    args.push("-f".to_string());
-                    args.push("bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best".to_string());
-                    args.push("--merge-output-format".to_string());
-                    args.push("mp4".to_string());
-                } else {
-                    args.push("-f".to_string());
-                    args.push("best[ext=mp4]/best".to_string());
-                }
-            } else {
-                args.push("-f".to_string());
-                args.push(format!("{fs}/best"));
-                if ffmpeg_bin.is_some() {
-                    args.push("--merge-output-format".to_string());
-                    args.push("mp4".to_string());
-                }
-            }
-        } else if ffmpeg_bin.is_some() {
-            args.push("-f".to_string());
-            args.push("bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best".to_string());
-            args.push("--merge-output-format".to_string());
-            args.push("mp4".to_string());
-        } else {
-            args.push("-f".to_string());
-            args.push("best[ext=mp4]/best".to_string());
-        }
-    }
-
+    args.extend(format_args);
     args.push("-o".to_string());
     args.push(out_template);
     args.push(actual_url.to_string());
@@ -1668,5 +1820,56 @@ mod tests {
         }
         let best = compact.best.unwrap();
         assert_eq!(best.size_formatted, "Auto · 1080p", "Best available on live stream must show no size number");
+    }
+
+    #[test]
+    fn test_combine_format_selector_and_ytdlp_args() {
+        // Explicit height with format_id
+        let sel_720 = combine_format_selector(Some("136+140"), Some("720p"));
+        assert_eq!(sel_720.as_deref(), Some("136+140|720p"));
+        let (args_720, is_mp3_720) = build_ytdlp_format_args(sel_720.as_deref(), false, true);
+        assert!(!is_mp3_720);
+        assert_eq!(args_720[0], "-f");
+        assert!(args_720[1].starts_with("136+140/bestvideo[height<=720]"), "got {}", args_720[1]);
+
+        // Height fallback without format_id (DEFAULT_QUALITIES)
+        let sel_480 = combine_format_selector(None, Some("480p"));
+        assert_eq!(sel_480.as_deref(), Some("480p"));
+        let (args_480, _) = build_ytdlp_format_args(sel_480.as_deref(), false, true);
+        assert!(args_480[1].starts_with("bestvideo[height<=480]"), "got {}", args_480[1]);
+
+        let sel_360 = combine_format_selector(Some("best"), Some("360p"));
+        assert_eq!(sel_360.as_deref(), Some("360p"));
+        let (args_360, _) = build_ytdlp_format_args(sel_360.as_deref(), false, false);
+        assert!(args_360[1].starts_with("best[height<=360]"), "got {}", args_360[1]);
+
+        // Audio with concrete format_id still passes -x --audio-format mp3 when ffmpeg is present
+        let sel_aud_fid = combine_format_selector(Some("140"), Some("Audio only"));
+        assert_eq!(sel_aud_fid.as_deref(), Some("audio:140"));
+        let (args_aud_fid, is_mp3_fid) = build_ytdlp_format_args(sel_aud_fid.as_deref(), true, true);
+        assert!(is_mp3_fid);
+        assert_eq!(
+            args_aud_fid,
+            vec!["-f", "140/bestaudio/best", "-x", "--audio-format", "mp3"]
+        );
+
+        // Audio without format_id
+        let sel_aud = combine_format_selector(None, Some("audio"));
+        assert_eq!(sel_aud.as_deref(), Some("audio"));
+        let (args_aud, is_mp3) = build_ytdlp_format_args(sel_aud.as_deref(), true, true);
+        assert!(is_mp3);
+        assert_eq!(
+            args_aud,
+            vec!["-f", "bestaudio/best", "-x", "--audio-format", "mp3"]
+        );
+
+        // Best available / stream fallbacks
+        let sel_best = combine_format_selector(None, Some("Best available"));
+        assert_eq!(sel_best.as_deref(), Some("best"));
+        let (args_best, _) = build_ytdlp_format_args(sel_best.as_deref(), false, true);
+        assert!(args_best[1].starts_with("bestvideo[ext=mp4]+bestaudio[ext=m4a]"), "got {}", args_best[1]);
+
+        let sel_stream = combine_format_selector(None, Some("stream"));
+        assert_eq!(sel_stream.as_deref(), Some("best"));
     }
 }

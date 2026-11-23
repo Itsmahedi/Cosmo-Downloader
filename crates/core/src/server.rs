@@ -461,7 +461,10 @@ impl BridgeServer {
                                         cat.default_dir().join(fname)
                                     });
 
-                                    let format_selector = dl_req.format_id.clone().or_else(|| dl_req.quality.clone());
+                                    let format_selector = crate::youtube::combine_format_selector(
+                                        dl_req.format_id.as_deref(),
+                                        dl_req.quality.as_deref(),
+                                    );
                                     let options = DownloadOptions {
                                         url: dl_req.url.clone(),
                                         output_path,

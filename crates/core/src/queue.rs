@@ -414,9 +414,14 @@ impl QueueManager {
         let is_torrent = crate::torrent::is_torrent_url(&record.url);
         let is_stream = !is_torrent && (
             crate::youtube::is_streaming_site(&record.url)
-            || record.custom_headers.as_deref() == Some("best")
-            || record.custom_headers.as_deref() == Some("audio")
-            || record.custom_headers.as_ref().map(|s| s.ends_with('p')).unwrap_or(false)
+            || record.custom_headers.as_ref().map(|s| {
+                let low = s.trim().to_ascii_lowercase();
+                low == "best"
+                    || low == "audio"
+                    || low.starts_with("audio:")
+                    || low.ends_with('p')
+                    || low.contains('|')
+            }).unwrap_or(false)
         );
         let ytdlp_bin = if is_stream { crate::youtube::find_ytdlp_binary() } else { None };
 

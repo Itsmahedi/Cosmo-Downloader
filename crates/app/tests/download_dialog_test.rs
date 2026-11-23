@@ -1128,3 +1128,62 @@ fn test_download_dialog_opens_when_app_minimized_to_tray() {
     assert!(!is_popup_mode);
     assert!(!is_main_window_open.load(Ordering::Relaxed));
 }
+
+#[test]
+fn test_requested_quality_overrides_cached_best_and_preserves_selector() {
+    use rustget_app::dialogs::download_window::DownloadWindowState;
+    use rustget_core::youtube::combine_format_selector;
+
+    let mut wnd = DownloadWindowState::new(
+        "https://www.youtube.com/watch?v=test_quality_override".to_string(),
+        "Sample.mp4".to_string(),
+        "Video".to_string(),
+        "C:\\Users\\steam\\Videos".to_string(),
+    );
+
+    // Simulate initial default having cached best 1080p
+    wnd.selected_quality = Some("Best available".to_string());
+    wnd.selected_format_id = Some("137+140".to_string());
+    wnd.file_size = Some(68_500_000);
+    wnd.formatted_size = Some("Auto · 1080p · 65 MB".to_string());
+
+    // Selecting 480p without cached format_id clears best format_id and falls back to height-capped 480p
+    wnd.apply_requested_quality(Some("480p".to_string()), None, None, None, None);
+    assert_eq!(wnd.selected_quality.as_deref(), Some("480p"));
+    assert_eq!(wnd.selected_format_id, None);
+    assert_eq!(
+        combine_format_selector(wnd.selected_format_id.as_deref(), wnd.selected_quality.as_deref()).as_deref(),
+        Some("480p")
+    );
+
+    // Selecting 480p with explicit format_id preserves both format_id and height cap
+    wnd.apply_requested_quality(
+        Some("480p".to_string()),
+        Some("135+140".to_string()),
+        Some(17_100_000),
+        Some("16 MB".to_string()),
+        Some(false),
+    );
+    assert_eq!(wnd.selected_quality.as_deref(), Some("480p"));
+    assert_eq!(wnd.selected_format_id.as_deref(), Some("135+140"));
+    assert_eq!(wnd.file_size, Some(17_100_000));
+    assert_eq!(wnd.formatted_size.as_deref(), Some("16 MB"));
+    assert_eq!(
+        combine_format_selector(wnd.selected_format_id.as_deref(), wnd.selected_quality.as_deref()).as_deref(),
+        Some("135+140|480p")
+    );
+
+    // Selecting Audio only produces audio:<fid>
+    wnd.apply_requested_quality(
+        Some("audio".to_string()),
+        Some("140".to_string()),
+        Some(5_200_000),
+        Some("5.0 MB".to_string()),
+        Some(false),
+    );
+    assert_eq!(wnd.selected_quality.as_deref(), Some("Audio only"));
+    assert_eq!(
+        combine_format_selector(wnd.selected_format_id.as_deref(), wnd.selected_quality.as_deref()).as_deref(),
+        Some("audio:140")
+    );
+}

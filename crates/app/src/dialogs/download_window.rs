@@ -118,6 +118,9 @@ pub struct DownloadWindowState {
     pub cascade_index: usize,
     pub host: String,
     pub window_pos: Option<Pos2>,
+    pub cookies: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 impl DownloadWindowState {
@@ -322,7 +325,141 @@ impl DownloadWindowState {
             cascade_index: 0,
             host,
             window_pos: None,
+            cookies: None,
+            referer: None,
+            user_agent: None,
         }
+    }
+
+    pub fn apply_requested_quality(
+        &mut self,
+        quality: Option<String>,
+        format_id: Option<String>,
+        size: Option<u64>,
+        size_formatted: Option<String>,
+        is_approx: Option<bool>,
+    ) {
+        let req_quality = quality
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let req_fid = format_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if req_quality.is_none() && req_fid.is_none() {
+            return;
+        }
+
+        let cached = if rustget_core::youtube::is_streaming_site(&self.url) {
+            rustget_core::youtube::get_cached_video_formats(&self.url)
+        } else {
+            None
+        };
+
+        let matched = cached.as_ref().and_then(|c| {
+            if let Some(ref q) = req_quality {
+                let q_low = q.to_ascii_lowercase();
+                if q_low == "audio" || q_low == "audio only" {
+                    return c.audio.as_ref();
+                }
+                if q_low == "best"
+                    || q_low == "best available"
+                    || q_low == "best quality"
+                    || q_low == "stream"
+                    || q_low.starts_with("best (")
+                    || q_low.starts_with("auto")
+                {
+                    return c.best.as_ref();
+                }
+                if let Some(opt) = c
+                    .qualities
+                    .iter()
+                    .find(|item| item.format.eq_ignore_ascii_case(q) || item.label.eq_ignore_ascii_case(q))
+                {
+                    return Some(opt);
+                }
+            }
+            if let Some(ref fid) = req_fid {
+                if let Some(opt) = c.qualities.iter().find(|item| item.format_id == *fid) {
+                    return Some(opt);
+                }
+                if let Some(ref audio) = c.audio {
+                    if audio.format_id == *fid {
+                        return Some(audio);
+                    }
+                }
+                if let Some(ref best) = c.best {
+                    if best.format_id == *fid {
+                        return Some(best);
+                    }
+                }
+            }
+            None
+        });
+
+        let display_quality = match req_quality.as_deref() {
+            Some(q) => {
+                let q_low = q.to_ascii_lowercase();
+                if q_low == "audio" || q_low == "audio only" {
+                    Some("Audio only".to_string())
+                } else if q_low == "best"
+                    || q_low == "best available"
+                    || q_low == "best quality"
+                    || q_low.starts_with("auto")
+                {
+                    if let Some(h) = matched.and_then(|m| m.height) {
+                        Some(format!("Best ({}p)", h))
+                    } else {
+                        Some("Best available".to_string())
+                    }
+                } else {
+                    Some(q.to_string())
+                }
+            }
+            None => matched.map(|m| m.label.clone()),
+        };
+
+        let resolved_fid = req_fid.or_else(|| matched.map(|m| m.format_id.clone()));
+        let resolved_size = size.or_else(|| matched.and_then(|m| m.size));
+        let resolved_approx = is_approx.or_else(|| matched.map(|m| m.is_approx));
+        let clean_size_fmt = size_formatted
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let resolved_size_fmt = if let Some(sz) = resolved_size {
+            if let Some(ref sf) = clean_size_fmt {
+                if sf.starts_with("Auto · ") {
+                    Some(rustget_core::youtube::format_quality_size(
+                        Some(sz),
+                        resolved_approx.unwrap_or(false),
+                    ))
+                } else {
+                    Some(sf.clone())
+                }
+            } else {
+                Some(
+                    matched
+                        .map(|m| m.size_formatted.clone())
+                        .filter(|s| !s.starts_with("Auto · "))
+                        .unwrap_or_else(|| {
+                            rustget_core::youtube::format_quality_size(
+                                Some(sz),
+                                resolved_approx.unwrap_or(false),
+                            )
+                        }),
+                )
+            }
+        } else {
+            clean_size_fmt.or_else(|| matched.map(|m| m.size_formatted.clone()))
+        };
+
+        self.selected_quality = display_quality;
+        self.selected_format_id = resolved_fid;
+        self.file_size = resolved_size;
+        self.total_bytes = resolved_size;
+        self.disp_total = resolved_size;
+        self.formatted_size = resolved_size_fmt;
+        self.is_size_approx = resolved_approx;
     }
 
     pub fn poll_info_rx(&mut self) {
@@ -339,9 +476,21 @@ impl DownloadWindowState {
                             "STEP: video info lookup finished for url='{}': title='{}', size={:?}",
                             self.url, info.title, info.filesize_approx
                         ));
-                        self.filename = info.filename;
-                        if let Some(cached) = rustget_core::youtube::get_cached_video_formats(&self.url) {
-                            if self.selected_quality.is_none() {
+                        let is_audio_dl = self
+                            .selected_quality
+                            .as_deref()
+                            .map(|q| q.eq_ignore_ascii_case("audio") || q.eq_ignore_ascii_case("audio only"))
+                            .unwrap_or(false)
+                            || self.filename.to_ascii_lowercase().ends_with(".mp3");
+                        if is_audio_dl {
+                            let mut path_buf = std::path::PathBuf::from(&info.filename);
+                            path_buf.set_extension("mp3");
+                            self.filename = path_buf.to_string_lossy().to_string();
+                        } else {
+                            self.filename = info.filename;
+                        }
+                        if self.selected_quality.is_none() {
+                            if let Some(cached) = rustget_core::youtube::get_cached_video_formats(&self.url) {
                                 if let Some(ref best) = cached.best {
                                     self.selected_quality = Some(best.label.clone());
                                     self.formatted_size = Some(best.size_formatted.clone());
@@ -349,10 +498,28 @@ impl DownloadWindowState {
                                     self.selected_format_id = Some(best.format_id.clone());
                                 }
                             }
+                        } else if self.selected_format_id.is_none() || self.file_size.is_none() {
+                            self.apply_requested_quality(
+                                self.selected_quality.clone(),
+                                self.selected_format_id.clone(),
+                                self.file_size,
+                                self.formatted_size.clone(),
+                                self.is_size_approx,
+                            );
                         }
-                        if let Some(sz) = info.filesize_approx {
-                            if self.file_size.is_none() {
+                        let is_best_selected = self
+                            .selected_quality
+                            .as_deref()
+                            .map(|q| {
+                                let low = q.to_ascii_lowercase();
+                                low == "best" || low.starts_with("best")
+                            })
+                            .unwrap_or(true);
+                        if is_best_selected && self.file_size.is_none() {
+                            if let Some(sz) = info.filesize_approx {
                                 self.file_size = Some(sz);
+                                self.total_bytes = Some(sz);
+                                self.disp_total = Some(sz);
                             }
                         }
                         self.info_status = InfoLookupStatus::Success;

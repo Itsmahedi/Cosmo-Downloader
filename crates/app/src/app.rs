@@ -195,6 +195,11 @@ pub struct DownloadDialogRequest {
     pub referer: Option<String>,
     pub user_agent: Option<String>,
     pub num_segments: Option<usize>,
+    pub quality: Option<String>,
+    pub format_id: Option<String>,
+    pub size: Option<u64>,
+    pub size_formatted: Option<String>,
+    pub is_approx: Option<bool>,
 }
 
 impl DownloadDialogRequest {
@@ -206,6 +211,11 @@ impl DownloadDialogRequest {
             referer: None,
             user_agent: None,
             num_segments: None,
+            quality: None,
+            format_id: None,
+            size: None,
+            size_formatted: None,
+            is_approx: None,
         }
     }
 }
@@ -869,11 +879,7 @@ impl CosmoDownloaderApp {
             if let Some(ref url) = initial_url_arg {
                 let d_req = DownloadDialogRequest {
                     url: url.clone(),
-                    filename: None,
-                    cookies: None,
-                    referer: None,
-                    user_agent: None,
-                    num_segments: None,
+                    ..Default::default()
                 };
                 app.show_download_dialog(d_req, "force_show_add", None);
             } else {
@@ -887,16 +893,17 @@ impl CosmoDownloaderApp {
                 referer: req.referer,
                 user_agent: req.user_agent,
                 num_segments: req.num_segments,
+                quality: req.quality,
+                format_id: req.format_id,
+                size: req.size,
+                size_formatted: req.size_formatted,
+                is_approx: req.is_approx,
             };
             app.show_download_dialog(d_req, "standalone_req", None);
         } else if let Some(url_arg) = initial_url_arg {
             let d_req = DownloadDialogRequest {
                 url: url_arg,
-                filename: None,
-                cookies: None,
-                referer: None,
-                user_agent: None,
-                num_segments: None,
+                ..Default::default()
             };
             app.show_download_dialog(d_req, "initial_url_arg", None);
         }
@@ -1045,6 +1052,60 @@ impl CosmoDownloaderApp {
                 );
                 self.download_windows[existing_idx].is_open = true;
                 self.download_windows[existing_idx].confirming_cancel = false;
+                if self.download_windows[existing_idx].stage == DownloadWindowStage::Info
+                    && (req.quality.is_some() || req.format_id.is_some())
+                {
+                    let is_audio_req = req
+                        .quality
+                        .as_deref()
+                        .map(|q| q.eq_ignore_ascii_case("audio") || q.eq_ignore_ascii_case("audio only"))
+                        .unwrap_or(false)
+                        || req
+                            .filename
+                            .as_deref()
+                            .map(|f| f.to_ascii_lowercase().ends_with(".mp3"))
+                            .unwrap_or(false);
+                    let wnd_url = self.download_windows[existing_idx].url.clone();
+                    let wnd_cat_name = self.download_windows[existing_idx].category.clone();
+                    let new_cat = if rustget_core::youtube::is_streaming_site(&wnd_url) {
+                        if is_audio_req {
+                            Category::Music
+                        } else {
+                            Category::Video
+                        }
+                    } else {
+                        Category::from_name(&wnd_cat_name).unwrap_or(Category::General)
+                    };
+                    let new_save_dir = self.resolve_save_dir_for_category(new_cat);
+                    let wnd = &mut self.download_windows[existing_idx];
+                    if let Some(ref f) = req.filename {
+                        if !f.trim().is_empty() {
+                            wnd.filename = rustget_core::probe::sanitize_filename(f);
+                        }
+                    } else if is_audio_req && !wnd.filename.trim().is_empty() {
+                        let mut pb = PathBuf::from(&wnd.filename);
+                        pb.set_extension("mp3");
+                        wnd.filename = pb.to_string_lossy().to_string();
+                    }
+                    wnd.category = new_cat.name().to_string();
+                    wnd.save_dir = new_save_dir;
+                    wnd.apply_requested_quality(
+                        req.quality.clone(),
+                        req.format_id.clone(),
+                        req.size,
+                        req.size_formatted.clone(),
+                        req.is_approx,
+                    );
+                    if req.cookies.is_some() {
+                        wnd.cookies = req.cookies.clone();
+                    }
+                    if req.referer.is_some() {
+                        wnd.referer = req.referer.clone();
+                    }
+                    if req.user_agent.is_some() {
+                        wnd.user_agent = req.user_agent.clone();
+                    }
+                }
                 if let Some(c) = ctx {
                     if self.is_popup_mode && existing_idx == 0 {
                         c.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -1172,13 +1233,28 @@ impl CosmoDownloaderApp {
             String::new()
         };
 
+        let is_audio_req = req
+            .quality
+            .as_deref()
+            .map(|q| q.eq_ignore_ascii_case("audio") || q.eq_ignore_ascii_case("audio only"))
+            .unwrap_or(false)
+            || filename.to_ascii_lowercase().ends_with(".mp3");
+
         let cat = if rustget_core::youtube::is_streaming_site(&clean_url) {
             if filename.is_empty() || filename.eq_ignore_ascii_case("watch") {
-                filename = "YouTube_Video.mp4".to_string();
+                filename = if is_audio_req {
+                    "YouTube_Audio.mp3".to_string()
+                } else {
+                    "YouTube_Video.mp4".to_string()
+                };
             } else if !filename.contains('.') {
-                filename.push_str(".mp4");
+                filename.push_str(if is_audio_req { ".mp3" } else { ".mp4" });
             }
-            Category::Video
+            if is_audio_req {
+                Category::Music
+            } else {
+                Category::Video
+            }
         } else if !filename.is_empty() {
             categorize(Some(&filename), None)
         } else {
@@ -1193,6 +1269,16 @@ impl CosmoDownloaderApp {
             cat.name().to_string(),
             save_dir,
         );
+        wnd.apply_requested_quality(
+            req.quality.clone(),
+            req.format_id.clone(),
+            req.size,
+            req.size_formatted.clone(),
+            req.is_approx,
+        );
+        wnd.cookies = req.cookies.clone();
+        wnd.referer = req.referer.clone();
+        wnd.user_agent = req.user_agent.clone();
         wnd.connections = req.num_segments.unwrap_or(self.setting_default_connections).clamp(1, 32);
         wnd.cascade_index = cascade_idx;
         wnd.window_pos = Some(win_pos);
@@ -1315,6 +1401,7 @@ impl CosmoDownloaderApp {
             referer,
             user_agent,
             num_segments,
+            ..Default::default()
         };
         self.show_download_dialog(req, "legacy_prepare", None);
     }
@@ -1325,7 +1412,14 @@ impl CosmoDownloaderApp {
         }
         let wnd = &mut self.download_windows[window_idx];
         let url = wnd.url.trim().to_string();
-        platform::log_daemon(&format!("STEP: download started: idx={}, url='{}'", window_idx, url));
+        let format_selector = rustget_core::youtube::combine_format_selector(
+            wnd.selected_format_id.as_deref(),
+            wnd.selected_quality.as_deref(),
+        );
+        platform::log_daemon(&format!(
+            "STEP: download started: idx={}, url='{}', quality={:?}, format_id={:?}, format_selector={:?}",
+            window_idx, url, wnd.selected_quality, wnd.selected_format_id, format_selector
+        ));
         if let Err(err) = rustget_core::probe::validate_http_url(&url) {
             wnd.error_message = Some(err.to_string());
             return false;
@@ -1353,6 +1447,7 @@ impl CosmoDownloaderApp {
             } else {
                 Some(wnd.checksum.trim().to_string())
             },
+            custom_headers: format_selector,
             ..Default::default()
         };
 
@@ -1370,15 +1465,9 @@ impl CosmoDownloaderApp {
         self.active_popup_url = url.clone();
         opt.output_path = Some(out_path);
 
-        if let Some(c) = self.add_cookies.take() {
-            opt.cookie = Some(c);
-        }
-        if let Some(r) = self.add_referer.take() {
-            opt.referer = Some(r);
-        }
-        if let Some(ua) = self.add_user_agent.take() {
-            opt.user_agent = Some(ua);
-        }
+        opt.cookie = wnd.cookies.clone().or_else(|| self.add_cookies.take());
+        opt.referer = wnd.referer.clone().or_else(|| self.add_referer.take());
+        opt.user_agent = wnd.user_agent.clone().or_else(|| self.add_user_agent.take());
 
         let q = Arc::clone(&self.queue);
         let speed_bps = wnd.speed_limit_kb * 1024;
@@ -2358,6 +2447,11 @@ impl eframe::App for CosmoDownloaderApp {
                 referer: req.referer,
                 user_agent: req.user_agent,
                 num_segments: req.num_segments,
+                quality: req.quality,
+                format_id: req.format_id,
+                size: req.size,
+                size_formatted: req.size_formatted,
+                is_approx: req.is_approx,
             };
             self.show_download_dialog(dialog_req, "extension", Some(ctx));
         }
@@ -2368,11 +2462,7 @@ impl eframe::App for CosmoDownloaderApp {
                 platform::log_daemon(&format!("Clipboard monitor detected URL: {}", url));
                 let dialog_req = DownloadDialogRequest {
                     url,
-                    filename: None,
-                    cookies: None,
-                    referer: None,
-                    user_agent: None,
-                    num_segments: None,
+                    ..Default::default()
                 };
                 self.show_download_dialog(dialog_req, "clipboard", Some(ctx));
             }
