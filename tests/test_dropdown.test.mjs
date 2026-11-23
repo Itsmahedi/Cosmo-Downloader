@@ -61,6 +61,59 @@ before(async () => {
   <script src="/content.js"></script>
 </body>
 </html>`);
+    } else if (url.pathname === "/overlap") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Cosmo Overlap Test</title>
+  <link rel="stylesheet" href="/content.css">
+  <style>
+    body { margin: 0; padding: 40px; background: #0f172a; }
+    .player-box { position: relative; width: 640px; height: 360px; }
+    .player-box video { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div class="player-box" id="overlap-player">
+    <video width="640" height="360" controls src="/sample.mp4"></video>
+  </div>
+  <script>
+    window.sentMessages = [];
+    window.chrome = {
+      runtime: {
+        getURL: (p) => "/" + p,
+        sendMessage: (msg, cb) => {
+          window.sentMessages.push(msg);
+          if (msg.action === "getVideoFormats" && cb) {
+            cb({
+              success: true,
+              formats: {
+                video_id: "test_overlap",
+                title: "4K Test Video",
+                is_live: false,
+                qualities: [
+                  { label: "2160p", format: "2160p", height: 2160, format_id: "313+251", size: 1331439861, size_formatted: "1.24 GB", is_approx: true },
+                  { label: "1080p", format: "1080p", height: 1080, format_id: "137+140", size: 68500000, size_formatted: "65 MB", is_approx: false },
+                  { label: "720p", format: "720p", height: 720, format_id: "136+140", size: 34200000, size_formatted: "33 MB", is_approx: false },
+                  { label: "480p", format: "480p", height: 480, format_id: "135+140", size: 17100000, size_formatted: "16 MB", is_approx: false },
+                  { label: "360p", format: "360p", height: 360, format_id: "134+140", size: 9500000, size_formatted: "9.1 MB", is_approx: false }
+                ],
+                audio: { label: "Audio only", format: "audio", height: null, format_id: "140", size: 5200000, size_formatted: "5.0 MB", is_approx: false },
+                best: { label: "Best available", format: "best", height: 2160, format_id: "313+251", size: 1331439861, size_formatted: "Auto · 2160p · ~1.24 GB", is_approx: true }
+              }
+            });
+            return;
+          }
+          if (cb) cb({ success: true });
+        }
+      }
+    };
+  </script>
+  <script src="/content.js"></script>
+</body>
+</html>`);
     } else if (url.pathname === "/content.css") {
       res.writeHead(200, { "Content-Type": "text/css" });
       res.end(fs.readFileSync(path.join(extDir, "content.css")));
@@ -102,6 +155,11 @@ test("Video Download Button appears with correct ARIA attributes and hidden menu
 
   assert.equal(await btn.getAttribute("aria-haspopup"), "true");
   assert.equal(await btn.getAttribute("aria-expanded"), "false");
+
+  const btnLogo = page.locator("#main-player .cosmo-video-download-btn svg.cosmo-btn-logo");
+  await assert.doesNotReject(btnLogo.waitFor({ state: "visible", timeout: 3000 }));
+  assert.equal(await page.locator("#main-player .cosmo-menu-header svg.cosmo-menu-logo").count(), 1);
+  assert.equal(await page.locator("#main-player .cosmo-video-container img").count(), 0);
 
   const menu = page.locator("#main-player .cosmo-quality-menu");
   const isMenuVisible = await menu.evaluate((el) => window.getComputedStyle(el).display !== "none");
@@ -195,9 +253,11 @@ test("Every quality option sends downloadVideo message and auto-closes menu", as
     // Menu must auto-close
     assert.equal(await menu.evaluate((el) => window.getComputedStyle(el).display), "none");
 
-    // Button feedback text
+    // Button text stays "Download" without switching to a sent feedback state
     const btnText = await page.locator("#main-player .cosmo-btn-text").textContent();
-    assert.ok(btnText.includes("Sent to CosmoDownloader"), `Feedback text not displayed for format ${format}`);
+    assert.equal(btnText, "Download", `Button text should remain "Download" for format ${format}, got: ${btnText}`);
+    const btnClass = (await btn.getAttribute("class")) || "";
+    assert.ok(!btnClass.split(/\s+/).includes("sent"), `Button must not have sent class for format ${format}`);
 
     // Verify last message sent
     const lastMsg = await page.evaluate(() => window.sentMessages[window.sentMessages.length - 1]);
@@ -225,6 +285,55 @@ test("Menu flips upward when near viewport bottom to prevent overflow", async ()
   await overflowBtn.click();
   const classes = await overflowContainer.getAttribute("class");
   assert.ok(classes.includes("flip-up"), `Expected container to have flip-up class, got: ${classes}`);
+
+  await page.close();
+});
+
+test("Best available / Auto text never overlaps or wraps, and clicking 480p sends 480p formatId", async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await page.goto(`http://127.0.0.1:${serverPort}/overlap`, { waitUntil: "domcontentloaded" });
+
+  const btn = page.locator("#overlap-player .cosmo-video-download-btn");
+  await btn.waitFor({ state: "visible", timeout: 4000 });
+  await btn.click();
+
+  const menu = page.locator("#overlap-player .cosmo-quality-menu");
+  await menu.waitFor({ state: "visible", timeout: 3000 });
+
+  const layoutIssues = await page.evaluate(() => {
+    const m = document.querySelector("#overlap-player .cosmo-quality-menu");
+    const menuRect = m.getBoundingClientRect();
+    const items = Array.from(document.querySelectorAll("#overlap-player .cosmo-quality-item"));
+    const issues = [];
+    for (const item of items) {
+      const nameEl = item.querySelector(".quality-name");
+      const metaEl = item.querySelector(".meta");
+      const nameRect = nameEl.getBoundingClientRect();
+      const metaRect = metaEl.getBoundingClientRect();
+      if (Math.abs(nameRect.top - metaRect.top) >= 6) {
+        issues.push(`Row '${nameEl.textContent}' wrapped vertically: nameTop=${nameRect.top}, metaTop=${metaRect.top}`);
+      }
+      if (nameRect.right + 8 > metaRect.left) {
+        issues.push(`Row '${nameEl.textContent}' overlaps meta '${metaEl.textContent}': nameRight=${nameRect.right}, metaLeft=${metaRect.left}`);
+      }
+      if (metaRect.right > menuRect.right + 1) {
+        issues.push(`Row '${nameEl.textContent}' meta overflows menu right: metaRight=${metaRect.right}, menuRight=${menuRect.right}`);
+      }
+    }
+    return { itemCount: items.length, issues };
+  });
+
+  assert.equal(layoutIssues.itemCount, 7);
+  assert.deepEqual(layoutIssues.issues, []);
+
+  await page.locator('#overlap-player .cosmo-quality-item[data-format="480p"]').click();
+  const lastMsg = await page.evaluate(() => {
+    return window.sentMessages.filter((m) => m.action === "downloadVideo").pop();
+  });
+  assert.ok(lastMsg);
+  assert.equal(lastMsg.quality, "480p");
+  assert.equal(lastMsg.formatId, "135+140");
+  assert.equal(lastMsg.size, 17100000);
 
   await page.close();
 });

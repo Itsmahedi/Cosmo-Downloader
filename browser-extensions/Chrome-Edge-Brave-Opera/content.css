@@ -55,12 +55,6 @@
   border-color: rgba(255, 255, 255, 0.16) !important;
 }
 
-.cosmo-video-download-btn.sent {
-  background: #8fa6c4 !important;
-  color: #0f1a2a !important;
-  border-color: #8fa6c4 !important;
-}
-
 .cosmo-btn-logo {
   width: 16px !important;
   height: 16px !important;
@@ -86,12 +80,12 @@
   stroke-linejoin: round !important;
 }
 
-/* Quality Selection Menu: min 176px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18) */
+/* Quality Selection Menu: min 220px wide, surface bg, 1px line, radius 10, 4px padding, shadow 0 8px 24px rgba(0,0,0,.18) */
 .cosmo-quality-menu {
   display: none !important;
-  min-width: 176px !important;
+  min-width: 220px !important;
   width: max-content !important;
-  max-width: 240px !important;
+  max-width: 340px !important;
   background: #22252a !important;
   border: 1px solid rgba(255, 255, 255, 0.08) !important;
   border-radius: 10px !important;
@@ -129,13 +123,16 @@
   font-size: 12px !important;
   color: #9097a1 !important;
   font-weight: 500 !important;
+  white-space: nowrap !important;
 }
 
-.cosmo-menu-header img {
+.cosmo-menu-header img,
+.cosmo-menu-header svg {
   width: 16px !important;
   height: 16px !important;
   border-radius: 2px !important;
   flex-shrink: 0 !important;
+  display: block !important;
 }
 
 .cosmo-quality-menu hr {
@@ -150,14 +147,17 @@
   display: flex !important;
   justify-content: space-between !important;
   align-items: center !important;
+  gap: 16px !important;
   width: 100% !important;
   height: 30px !important;
-  padding: 0 8px !important;
+  padding: 0 10px !important;
   border: 0 !important;
   border-radius: 6px !important;
   background: transparent !important;
   color: #e6e8eb !important;
   font-size: 13px !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
   text-align: left !important;
   cursor: pointer !important;
   transition: background 160ms ease-out, color 160ms ease-out !important;
@@ -169,10 +169,20 @@
   color: #8fa6c4 !important;
 }
 
+.cosmo-quality-item .quality-name {
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  min-width: 0 !important;
+  flex: 1 1 auto !important;
+}
+
 .cosmo-quality-item .meta {
   font-size: 12px !important;
   color: #9097a1 !important;
   font-variant-numeric: tabular-nums !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
 }
 
 .cosmo-quality-item:hover .meta,

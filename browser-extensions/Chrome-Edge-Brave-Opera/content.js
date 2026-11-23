@@ -23,6 +23,92 @@ if (typeof window !== "undefined") {
 }
 
 const runtime = typeof browser !== "undefined" ? browser : (typeof chrome !== "undefined" ? chrome : null);
+const SVG_NS = "http://www.w3.org/2000/svg";
+const initialExtensionId = (runtime && runtime.runtime && runtime.runtime.id) || null;
+let cosmoLogoUid = 0;
+
+function isExtensionContextInvalidated() {
+  try {
+    return Boolean(initialExtensionId && (!runtime || !runtime.runtime || !runtime.runtime.id));
+  } catch (_) {
+    return true;
+  }
+}
+
+function createCosmoLogoSvg(className = "") {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  if (className) svg.setAttribute("class", className);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("aria-hidden", "true");
+
+  const gradId = "cosmo-logo-grad-" + (++cosmoLogoUid);
+  const defs = document.createElementNS(SVG_NS, "defs");
+  const grad = document.createElementNS(SVG_NS, "linearGradient");
+  grad.setAttribute("id", gradId);
+  grad.setAttribute("x1", "0");
+  grad.setAttribute("y1", "0");
+  grad.setAttribute("x2", "0");
+  grad.setAttribute("y2", "1");
+
+  [
+    ["0%", "#00d8ff"],
+    ["50%", "#3a7bff"],
+    ["100%", "#8b3dff"]
+  ].forEach(([offset, color]) => {
+    const stop = document.createElementNS(SVG_NS, "stop");
+    stop.setAttribute("offset", offset);
+    stop.setAttribute("stop-color", color);
+    grad.appendChild(stop);
+  });
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  const outerDisc = document.createElementNS(SVG_NS, "circle");
+  outerDisc.setAttribute("cx", "12");
+  outerDisc.setAttribute("cy", "12");
+  outerDisc.setAttribute("r", "10.2");
+  outerDisc.setAttribute("fill", "#12052b");
+  svg.appendChild(outerDisc);
+
+  const cyanArc = document.createElementNS(SVG_NS, "path");
+  cyanArc.setAttribute("d", "M2.3 8.1 A10.5 10.5 0 1 1 20.5 18.2");
+  cyanArc.setAttribute("fill", "none");
+  cyanArc.setAttribute("stroke", "#00f2ff");
+  cyanArc.setAttribute("stroke-width", "1.8");
+  cyanArc.setAttribute("stroke-linecap", "round");
+  svg.appendChild(cyanArc);
+
+  const magentaArc = document.createElementNS(SVG_NS, "path");
+  magentaArc.setAttribute("d", "M19.8 19.0 A10.5 10.5 0 0 1 1.9 14.7");
+  magentaArc.setAttribute("fill", "none");
+  magentaArc.setAttribute("stroke", "#e42ec0");
+  magentaArc.setAttribute("stroke-width", "1.8");
+  magentaArc.setAttribute("stroke-linecap", "round");
+  svg.appendChild(magentaArc);
+
+  const orbitDot = document.createElementNS(SVG_NS, "circle");
+  orbitDot.setAttribute("cx", "17.5");
+  orbitDot.setAttribute("cy", "6.6");
+  orbitDot.setAttribute("r", "1.35");
+  orbitDot.setAttribute("fill", "#00f7ff");
+  svg.appendChild(orbitDot);
+
+  const innerDisc = document.createElementNS(SVG_NS, "circle");
+  innerDisc.setAttribute("cx", "12");
+  innerDisc.setAttribute("cy", "12");
+  innerDisc.setAttribute("r", "6.5");
+  innerDisc.setAttribute("fill", `url(#${gradId})`);
+  svg.appendChild(innerDisc);
+
+  const arrow = document.createElementNS(SVG_NS, "path");
+  arrow.setAttribute("d", "M10.3 7.6 H13.7 V12.0 H16.0 L12.0 16.6 L8.0 12.0 H10.3 Z");
+  arrow.setAttribute("fill", "#ffffff");
+  svg.appendChild(arrow);
+
+  return svg;
+}
 
 const DEFAULT_QUALITIES = [
   { label: "1080p", format: "1080p", audioOnly: false },
@@ -217,21 +303,12 @@ function attachItemClickHandler(item, videoEl, menu) {
 
     const container = menu.closest(".cosmo-video-container");
     const btn = container ? container.querySelector(".cosmo-video-download-btn") : null;
-    const textEl = btn ? btn.querySelector(".cosmo-btn-text") : null;
-    const prevText = textEl ? textEl.textContent : "Download";
-    if (textEl) textEl.textContent = "Sent to CosmoDownloader";
-    if (btn) btn.classList.add("sent");
 
     if (container) {
       container.classList.remove("open");
       container.classList.remove("flip-up");
       if (btn) btn.setAttribute("aria-expanded", "false");
     }
-
-    setTimeout(() => {
-      if (textEl) textEl.textContent = prevText;
-      if (btn) btn.classList.remove("sent");
-    }, 2000);
   });
 }
 
@@ -310,7 +387,13 @@ function renderMenuRows(menu, videoEl) {
 
       const metaSpan = document.createElement("span");
       metaSpan.className = "meta";
-      metaSpan.textContent = isLive ? "" : (q.size_formatted || "");
+      if (isLive) {
+        metaSpan.textContent = "";
+      } else if (q.label && q.size_formatted && q.label.includes(q.size_formatted)) {
+        metaSpan.textContent = "";
+      } else {
+        metaSpan.textContent = q.size_formatted || "Auto";
+      }
 
       item.appendChild(titleSpan);
       item.appendChild(metaSpan);
@@ -587,16 +670,13 @@ function attachCosmoDownloadButton(videoEl) {
   btn.setAttribute("aria-haspopup", "true");
   btn.setAttribute("aria-expanded", "false");
 
-  const logoImg = document.createElement("img");
-  logoImg.className = "cosmo-btn-logo";
-  logoImg.alt = "Cosmo";
-  logoImg.src = runtime && runtime.runtime && runtime.runtime.getURL ? runtime.runtime.getURL("icons/icon-16.png") : "icons/icon-16.png";
+  const logoSvg = createCosmoLogoSvg("cosmo-btn-logo");
 
   const btnText = document.createElement("span");
   btnText.className = "cosmo-btn-text";
   btnText.textContent = "Download";
 
-  const chevSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const chevSvg = document.createElementNS(SVG_NS, "svg");
   chevSvg.setAttribute("class", "cosmo-btn-chevron");
   chevSvg.setAttribute("viewBox", "0 0 24 24");
   chevSvg.setAttribute("width", "14");
@@ -606,9 +686,11 @@ function attachCosmoDownloadButton(videoEl) {
   chevSvg.setAttribute("stroke-width", "1.6");
   chevSvg.setAttribute("stroke-linecap", "round");
   chevSvg.setAttribute("stroke-linejoin", "round");
-  chevSvg.innerHTML = '<path d="M7 10l5 5 5-5"/>';
+  const chevPath = document.createElementNS(SVG_NS, "path");
+  chevPath.setAttribute("d", "M7 10l5 5 5-5");
+  chevSvg.appendChild(chevPath);
 
-  btn.appendChild(logoImg);
+  btn.appendChild(logoSvg);
   btn.appendChild(btnText);
   btn.appendChild(chevSvg);
 
@@ -621,9 +703,7 @@ function attachCosmoDownloadButton(videoEl) {
   // Menu Header Row: logo 16px + label, 12px muted 500
   const menuHeader = document.createElement("div");
   menuHeader.className = "cosmo-menu-header";
-  const mLogo = document.createElement("img");
-  mLogo.src = logoImg.src;
-  mLogo.alt = "Cosmo";
+  const mLogo = createCosmoLogoSvg("cosmo-menu-logo");
   const mLabel = document.createElement("span");
   mLabel.textContent = "Cosmo Downloader";
   menuHeader.appendChild(mLogo);
@@ -952,7 +1032,7 @@ function triggerDownload(videoEl, format, qualityOption = null) {
  * Scans video elements, cleans up detached or unqualified buttons, and attaches to valid videos.
  */
 function scanVideos() {
-  if (siteExcluded) return;
+  if (stopScannerIfInvalidated() || siteExcluded) return;
 
   const curUrl = getCurrentStreamingUrl();
   if (curUrl && curUrl !== currentVideoUrl) {
@@ -999,18 +1079,38 @@ function scanVideos() {
 
 // Debounced scan for dynamic mutations and SPA navigation
 let scanDebounceTimer = null;
+let scanObserver = null;
+let scanIntervalId = null;
+
+function stopScannerIfInvalidated() {
+  if (!isExtensionContextInvalidated()) return false;
+  if (scanDebounceTimer) {
+    clearTimeout(scanDebounceTimer);
+    scanDebounceTimer = null;
+  }
+  if (scanIntervalId) {
+    clearInterval(scanIntervalId);
+    scanIntervalId = null;
+  }
+  if (scanObserver) {
+    scanObserver.disconnect();
+    scanObserver = null;
+  }
+  return true;
+}
+
 function debouncedScanVideos() {
-  if (siteExcluded) return;
+  if (stopScannerIfInvalidated() || siteExcluded) return;
   if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
   scanDebounceTimer = setTimeout(scanVideos, 200);
 }
 
 // Observe dynamic video additions
 if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
-  const observer = new MutationObserver(() => {
+  scanObserver = new MutationObserver(() => {
     debouncedScanVideos();
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  scanObserver.observe(document.documentElement, { childList: true, subtree: true });
 
   // Initial scan + exclusion check
   checkSiteExclusion();
@@ -1020,7 +1120,8 @@ if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" &
     fetchFormatsForVideo(currentVideoUrl);
   }
   scanVideos();
-  setInterval(() => {
+  scanIntervalId = setInterval(() => {
+    if (stopScannerIfInvalidated()) return;
     if (!siteExcluded && (isYouTubeHost() || document.querySelector("video") !== null)) {
       scanVideos();
     }
