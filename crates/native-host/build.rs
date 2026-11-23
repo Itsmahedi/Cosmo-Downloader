@@ -19,7 +19,7 @@ fn main() {
             Err(_) => return,
         };
 
-        let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.2.7".to_string());
+        let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.2.8".to_string());
         let mut ver_parts: Vec<&str> = pkg_version.split('.').collect();
         while ver_parts.len() < 4 {
             ver_parts.push("0");

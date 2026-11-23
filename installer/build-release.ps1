@@ -101,7 +101,7 @@ if (Test-Path $DistDir) {
 }
 New-Item -ItemType Directory -Path $DistDir | Out-Null
 
-$PortableDir = Join-Path $DistDir "CosmoDownloader-v1.2.7-windows-x64"
+$PortableDir = Join-Path $DistDir "CosmoDownloader-v1.2.8-windows-x64"
 New-Item -ItemType Directory -Path $PortableDir | Out-Null
 $ExtDir = Join-Path $PortableDir "Browser-Extensions"
 New-Item -ItemType Directory -Path $ExtDir | Out-Null
@@ -196,7 +196,7 @@ if (-not $SkipInstaller) {
 }
 
 # 7. Compress Portable Zip (containing already-signed binaries)
-$ZipPath = Join-Path $DistDir "CosmoDownloader-v1.2.7-windows-x64.zip"
+$ZipPath = Join-Path $DistDir "CosmoDownloader-v1.2.8-windows-x64.zip"
 Write-Host "`n[*] Creating portable ZIP archive: $ZipPath" -ForegroundColor Yellow
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 Compress-Archive -Path (Join-Path $PortableDir "*") -DestinationPath $ZipPath -Force
